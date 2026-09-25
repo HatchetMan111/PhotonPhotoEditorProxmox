@@ -38,7 +38,7 @@ fail() {
   journalctl -u kasmvnc -n 50 --no-pager 2>/dev/null || true
   # Falls Clean-DNS aktiv war, Original wiederherstellen; Proxy stoppen.
   if declare -F restore_dns >/dev/null 2>&1; then restore_dns >/dev/null 2>&1 || true; fi
-  if declare -F stop_local_proxy >/dev/null 2>&1; then stop_local_proxy >/dev/null 2>&1 || true; fi
+  if declare -F stop_transparent_proxy >/dev/null 2>&1; then stop_transparent_proxy >/dev/null 2>&1 || true; fi
   echo "==================================================================" >&2
   exit "${rc}"
 }
@@ -102,18 +102,19 @@ pin_hosts() {
   done
 }
 
-# Lokaler CONNECT-Proxy (127.0.0.1:8888, reines Python-Stdlib, kein MITM:
-# TLS laeuft Ende-zu-Ende durch, der Proxy schaufelt nur Bytes).
-# Zweck: Falls flatpak seine TCP-Sockets selbst kaputt aufbaut (Happy-Eyeballs-
-# Bug o. ae.), umgeht der Proxy NUR den Socket-Aufbau — SNI/IP/Bytes identisch.
-# Damit ist er gleichzeitig Fix-Kandidat UND Diagnose (geht's per Proxy,
-# lag es am Establishment; geht's nicht, liegt es an den Bytes).
-PROXY_PORT="8888"
-PROXY_PIDFILE="/tmp/photon-proxy.pid"
-start_local_proxy() {
-  cat > /root/photon-proxy.py <<'PYEOF'
-import socket, threading
-LISTEN = ("127.0.0.1", 8888)
+# Transparenter TCP-Forwarder (127.0.0.1:8888) + iptables-REDIRECT fuer ALLES
+# auf tcp/443. Heilt flatpak, dessen eigener Socket-Aufbau im LAN klemmt ([7]),
+# waehrend curl/python problemlos verbinden (9x reproduziert, libcurl-gnutls
+# vs. libcurl-openssl belegt). Kein MITM: TLS laeuft Ende-zu-Ende (SNI, IP,
+# Bytes identisch) — nur der TCP-Aufbau kommt aus bewiesen-funktionierendem
+# Python. Laeuft als 'nobody' + Owner-Ausnahme (kein Loop).
+TPROXY_PORT="8888"
+TPROXY_PID="/tmp/photon-tproxy.pid"
+TPROXY_SCRIPT="/tmp/photon-tproxy.py"
+TPROXY_LOG="/tmp/tproxy.log"
+start_transparent_proxy() {
+  cat > "$TPROXY_SCRIPT" <<'PYEOF'
+import socket, struct, threading
 def pipe(a, b):
     try:
         while True:
@@ -129,66 +130,85 @@ def pipe(a, b):
                 s.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+def orig_dst(c):
+    buf = c.getsockopt(socket.SOL_IP, 80, 16)
+    fam, port, raw, _ = struct.unpack("!HH4s8s", buf)
+    return (socket.inet_ntoa(raw), port)
 def handle(c):
     try:
-        req = b""
-        while b"\r\n\r\n" not in req:
-            chunk = c.recv(4096)
-            if not chunk:
-                c.close()
-                return
-            req += chunk
-        line = req.split(b"\r\n", 1)[0].decode("latin1")
-        parts = line.split()
-        if len(parts) < 3 or parts[0] != "CONNECT":
-            c.close()
-            return
-        host, _, port = parts[1].partition(":")
-        s = socket.create_connection((host, int(port or 443)), timeout=15)
-        c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        t1 = threading.Thread(target=pipe, args=(c, s), daemon=True)
-        t2 = threading.Thread(target=pipe, args=(s, c), daemon=True)
-        t1.start(); t2.start(); t1.join(); t2.join()
-    except Exception:
+        dst = orig_dst(c)
+    except OSError:
+        c.close()
+        return
+    try:
+        s = socket.create_connection(dst, timeout=15)
+    except OSError:
+        c.close()
+        return
+    t1 = threading.Thread(target=pipe, args=(c, s), daemon=True)
+    t2 = threading.Thread(target=pipe, args=(s, c), daemon=True)
+    t1.start(); t2.start(); t1.join(); t2.join()
+    try:
+        c.close()
+    except OSError:
         pass
-    finally:
-        try:
-            c.close()
-        except OSError:
-            pass
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(LISTEN)
-srv.listen(50)
-print("proxy ready", flush=True)
+srv.bind(("127.0.0.1", 8888))
+srv.listen(100)
+print("tproxy ready", flush=True)
 while True:
     c, _ = srv.accept()
     threading.Thread(target=handle, args=(c,), daemon=True).start()
 PYEOF
-  nohup python3 /root/photon-proxy.py >/tmp/proxy.log 2>&1 &
-  echo $! > "$PROXY_PIDFILE"
+  chmod 644 "$TPROXY_SCRIPT"
+  sudo -u nobody nohup python3 "$TPROXY_SCRIPT" >"$TPROXY_LOG" 2>&1 &
+  echo $! > "$TPROXY_PID"
   local i
   for i in $(seq 1 30); do
-    if (echo > "/dev/tcp/127.0.0.1/${PROXY_PORT}") 2>/dev/null; then
-      log "Local-Proxy laeuft (127.0.0.1:${PROXY_PORT})."
+    if (echo > "/dev/tcp/127.0.0.1/${TPROXY_PORT}") 2>/dev/null; then
+      log "Transparent-Proxy laeuft (127.0.0.1:${TPROXY_PORT}, als nobody)."
       return 0
     fi
     sleep 1
   done
-  warn "Local-Proxy startet nicht (s. /tmp/proxy.log)."
+  warn "Transparent-Proxy startet nicht (s. ${TPROXY_LOG})."
   return 1
 }
-stop_local_proxy() {
-  if [[ -f "$PROXY_PIDFILE" ]]; then
-    kill "$(cat "$PROXY_PIDFILE")" 2>/dev/null || true
-    rm -f "$PROXY_PIDFILE"
+stop_transparent_proxy() {
+  if [[ -f "$TPROXY_PID" ]]; then
+    kill "$(cat "$TPROXY_PID")" 2>/dev/null || true
+    rm -f "$TPROXY_PID"
+  fi
+  # Redirect-Regeln entfernen (still, falls nicht vorhanden).
+  iptables -t nat -D OUTPUT -p tcp --dport 443 -j REDIRECT --to-port "$TPROXY_PORT" 2>/dev/null || true
+  local nouid=""
+  nouid="$(id -u nobody 2>/dev/null || true)"
+  if [[ -n "$nouid" ]]; then
+    iptables -t nat -D OUTPUT -m owner --uid-owner "$nouid" -j ACCEPT 2>/dev/null || true
   fi
 }
-# flatpak mit Proxy-Env (inline, ohne globale Seiteneffekte auf curl).
-fp() {
-  https_proxy="http://127.0.0.1:${PROXY_PORT}" http_proxy="http://127.0.0.1:${PROXY_PORT}" \
-  HTTPS_PROXY="http://127.0.0.1:${PROXY_PORT}" HTTP_PROXY="http://127.0.0.1:${PROXY_PORT}" \
-    flatpak "$@"
+setup_transparent_proxy() {
+  # Rueckgabe 0 = aktiv + per Gate-Fetch BEWIESEN.
+  local nouid=""
+  nouid="$(id -u nobody 2>/dev/null || true)"
+  if [[ -z "$nouid" ]]; then warn "User 'nobody' fehlt - kein Transparent-Proxy."; return 1; fi
+  if ! command -v iptables >/dev/null 2>&1; then warn "iptables fehlt - kein Transparent-Proxy."; return 1; fi
+  start_transparent_proxy || return 1
+  iptables -t nat -I OUTPUT 1 -m owner --uid-owner "$nouid" -j ACCEPT 2>/dev/null \
+    || { warn "Owner-Match nicht moeglich - kein Transparent-Proxy."; stop_transparent_proxy; return 1; }
+  iptables -t nat -A OUTPUT -p tcp --dport 443 -j REDIRECT --to-port "$TPROXY_PORT" 2>/dev/null \
+    || { warn "REDIRECT-Regel nicht setzbar - kein Transparent-Proxy."; stop_transparent_proxy; return 1; }
+  log "Transparent-Redirect aktiv (tcp/443 -> 127.0.0.1:${TPROXY_PORT}), Gate-Fetch als Beweis ..."
+  local code=""
+  code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://dl.flathub.org/repo/summary.idx 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
+    log "Gate-Fetch OK (200) - Transparent-Pfad bewiesen."
+    return 0
+  fi
+  warn "Gate-Fetch scheiterte (code=${code:-?}) - baue Redirect zurueck, weiter direkt."
+  stop_transparent_proxy
+  return 1
 }
 
 # Original-resolv.conf sichern, sauberes DNS (1.1.1.1) TEMPORAER aktivieren.
@@ -328,19 +348,19 @@ fi
 log "Interface-MTUs:"
 ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done
 use_clean_dns
-# Local-Proxy starten: flatpak tunnelt dadurch (Bypass NUR fuer dessen
-# Socket-Aufbau; curl/python laufen weiter direkt). Siehe Helper-Kommentar.
-PROXY_UP=""
-if start_local_proxy; then PROXY_UP=1; else warn "Weiter ohne Proxy (direkt)."; fi
+# Transparent-Redirect fuer ALLES auf tcp/443 (Kernel-Ebene, keine App-
+# Kooperation noetig). Gate-Fetch beweist den Pfad VOR flatpak.
+TRANS_OK=""
+if setup_transparent_proxy; then TRANS_OK=1; else warn "Weiter ohne Transparent-Proxy (direkt)."; fi
 # Repo-Datei laden, dann LOKAL einhaengen (kein DNS zur Add-Zeit noetig).
 FLATHUB_ADDED=""
 for attempt in 1 2 3; do
   if fetch_url "$FLATHUB_REPO_URL" "$FLATHUB_REPO_FILE" \
-    && fp remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then
+    && flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then
     FLATHUB_ADDED=1; break
   fi
   # Letzter Ausweg: direkt (flatpak loest selbst auf).
-  if fp remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
+  if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
   [[ "$attempt" == "3" ]] || sleep 10
 done
 rm -f "$FLATHUB_REPO_FILE"
@@ -356,7 +376,7 @@ fi
 log "Installiere Runtime ${FLATHUB_RUNTIME} von Flathub ..."
 RUNTIME_OK=""
 for attempt in 1 2; do
-  if fp install -y --noninteractive flathub "$FLATHUB_RUNTIME"; then RUNTIME_OK=1; break; fi
+  if flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME"; then RUNTIME_OK=1; break; fi
   [[ "$attempt" == "2" ]] || { warn "Runtime-Install Versuch 1 scheiterte -> Retry in 15s."; sleep 15; }
 done
 if [[ -z "$RUNTIME_OK" ]]; then
@@ -395,10 +415,10 @@ fi
 [[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak fehlt/leer: ${PHOTON_FLATPAK}"
 # (Volle Ausgabe, keine Kuerzung: komplette Fehlerkette ist Pflicht.)
 log "Installiere Photon-Bundle (Runtime bereits vorhanden) ..."
-fp install -y --noninteractive "$PHOTON_FLATPAK" \
+flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
   || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
 rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
-stop_local_proxy
+stop_transparent_proxy
 restore_dns
 log "Hinweis: /etc/hosts-Pins bleiben bestehen (sonst brechen spaetere flatpak-Updates am LAN-Filter)."
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
