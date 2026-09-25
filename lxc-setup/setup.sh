@@ -103,19 +103,38 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 
 # -------------------------------------------------------- 4) Photon ----
 log "4/7 Photon Studio (Flatpak, ~270 MB) herunterladen + installieren ..."
-# Flathub-Remote mit Retry: DNS kann im frischen Container kurz wackeln
-# (apt/GitHub gingen, flathub schlug fehl -> transient). Diagnose bei Totalausfall.
+FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
+FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
+# Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
+# hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
+if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
+  warn "IPv6 zu Flathub defekt/langsam -> bevorzuge IPv4 (gai.conf)."
+  printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+fi
+# Repo-Datei per curl holen (mit -4 zuerst: Container-IPv4 ist bewiesen),
+# dann LOKAL einhaengen — flatpak muss dafuer nichts mehr aufloesen.
+FLATHUB_ADDED=""
 for attempt in 1 2 3; do
-  if flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo; then break; fi
-  if [[ "$attempt" == "3" ]]; then
-    warn "Flathub-Remote 3x fehlgeschlagen. DNS-Diagnose:"
-    echo "--- /etc/resolv.conf ---" >&2; cat /etc/resolv.conf >&2 || true
-    echo "--- getent hosts flathub.org ---" >&2; getent hosts flathub.org >&2 || true
-    echo "--- getent hosts archive.ubuntu.com (Kontrolle) ---" >&2; getent hosts archive.ubuntu.com >&2 || true
-    die "Flathub-Remote nicht erreichbar. Netzwerk/DNS im Container pruefen (s. Diagnose oben)."
+  if curl -4 -fsSL --retry 2 --max-time 30 -o "$FLATHUB_REPO_FILE" "$FLATHUB_REPO_URL" 2>/dev/null \
+    || curl -fsSL --retry 2 --max-time 30 -o "$FLATHUB_REPO_FILE" "$FLATHUB_REPO_URL" 2>/dev/null; then
+    if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then FLATHUB_ADDED=1; break; fi
   fi
-  sleep 10
+  # Letzter Ausweg: direkt (flatpak loest selbst auf).
+  if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
+  [[ "$attempt" == "3" ]] || sleep 10
 done
+rm -f "$FLATHUB_REPO_FILE"
+if [[ -z "$FLATHUB_ADDED" ]]; then
+  warn "Flathub-Remote 3x fehlgeschlagen. DNS-Diagnose:"
+  echo "--- /etc/resolv.conf ---" >&2; cat /etc/resolv.conf >&2 || true
+  echo "--- getent ahosts flathub.org (v4+v6) ---" >&2; getent ahosts flathub.org >&2 || true
+  echo "--- curl -4 Probe ---" >&2; curl -4 -sSI --max-time 10 "$FLATHUB_REPO_URL" >&2 | head -3 || true
+  echo "--- curl -6 Probe ---" >&2; curl -6 -sSI --max-time 10 "$FLATHUB_REPO_URL" >&2 | head -3 || true
+  echo "--- HINWEIS: Resolver .111 sieht nach Pi-hole/AdGuard aus:" >&2
+  echo "    dort im Query-Log nach flathub.org / dl.flathub.org suchen," >&2
+  echo "    ggf. whitelisten. Oder Container-DNS auf 1.1.1.1 testen." >&2
+  die "Flathub-Remote nicht erreichbar. Netzwerk/DNS im Container pruefen (s. Diagnose oben)."
+fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
 for attempt in 1 2 3; do
   # -L folgt dem 302-Redirect der Tenzen-API auf die aktuellste Version.
