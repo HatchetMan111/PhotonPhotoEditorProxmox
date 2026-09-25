@@ -41,6 +41,16 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PhotonPho
 | `VNC_PASSWORD` | (generiert) | Passwort für den Web-Desktop |
 | `DEBUG` | `0` | `DEBUG=1` → volles `bash -x` Log |
 
+## Hinweis: Pi-hole / AdGuard / DNS-Filter
+
+Das Script lädt von `tenzen.studio`, `downloads.tenzen.studio`, `flathub.org`
+und `dl.flathub.org`. `tenzen.studio` ist neu (2026) und steht auf manchen
+„Newly Registered Domain"-Blocklisten → Pi-hole löst dann `0.0.0.0` auf.
+Das Script erkennt das per Netz-Check und weicht temporär auf `1.1.1.1`
+aus (LAN-DNS bleibt Standard). Sauberer Dauer-Fix: im Pi-hole/AdGuard
+`tenzen.studio`, `downloads.tenzen.studio`, `flathub.org`, `dl.flathub.org`
+whitelisten.
+
 ## Nutzung
 
 Nach der Installation: `http://[LXC-IP]:8080` im Browser öffnen, mit dem angezeigten

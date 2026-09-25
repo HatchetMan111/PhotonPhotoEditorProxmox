@@ -169,6 +169,8 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 
 # -------------------------------------------------------- 4) Photon ----
 log "4/7 Photon Studio (Flatpak, ~270 MB) herunterladen + installieren ..."
+FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
+FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
 netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
@@ -176,8 +178,6 @@ if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; th
   warn "IPv6 zu Flathub defekt/langsam -> bevorzuge IPv4 (gai.conf)."
   printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
 fi
-FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
-FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
 # Repo-Datei laden (mit Clean-DNS-Bypass bei Filter), dann LOKAL einhaengen —
 # flatpak muss zum Add-Zeitpunkt nichts mehr aufloesen.
 FLATHUB_ADDED=""
