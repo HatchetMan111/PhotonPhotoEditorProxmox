@@ -114,14 +114,17 @@ TPROXY_SCRIPT="/tmp/photon-tproxy.py"
 TPROXY_LOG="/tmp/tproxy.log"
 start_transparent_proxy() {
   cat > "$TPROXY_SCRIPT" <<'PYEOF'
-import socket, struct, threading
-def pipe(a, b):
+import socket, struct, threading, time
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+def pipe(a, b, counter):
     try:
         while True:
             d = a.recv(65536)
             if not d:
                 break
             b.sendall(d)
+            counter[0] += len(d)
     except OSError:
         pass
     finally:
@@ -135,19 +138,31 @@ def orig_dst(c):
     fam, port, raw, _ = struct.unpack("!HH4s8s", buf)
     return (socket.inet_ntoa(raw), port)
 def handle(c):
+    peer = c.getpeername()
     try:
         dst = orig_dst(c)
-    except OSError:
+    except OSError as e:
+        log("NO-DST", peer, e)
         c.close()
         return
+    if dst[0].startswith("127."):
+        # Readiness-Probe / Loop-Schutz: nie auf Loopback zurueckwaehlen.
+        log("LOOP-GUARD", dst)
+        c.close()
+        return
+    log("START", peer, "->", dst)
     try:
         s = socket.create_connection(dst, timeout=15)
-    except OSError:
+    except OSError as e:
+        log("DIAL-FAIL", dst, e)
         c.close()
         return
-    t1 = threading.Thread(target=pipe, args=(c, s), daemon=True)
-    t2 = threading.Thread(target=pipe, args=(s, c), daemon=True)
+    log("DIAL-OK", dst)
+    up, down = [0], [0]
+    t1 = threading.Thread(target=pipe, args=(c, s, up), daemon=True)
+    t2 = threading.Thread(target=pipe, args=(s, c, down), daemon=True)
     t1.start(); t2.start(); t1.join(); t2.join()
+    log("END", dst, f"up={up[0]} down={down[0]}")
     try:
         c.close()
     except OSError:
@@ -162,7 +177,8 @@ while True:
     threading.Thread(target=handle, args=(c,), daemon=True).start()
 PYEOF
   chmod 644 "$TPROXY_SCRIPT"
-  sudo -u nobody nohup python3 "$TPROXY_SCRIPT" >"$TPROXY_LOG" 2>&1 &
+  touch "$TPROXY_LOG" && chmod 666 "$TPROXY_LOG"
+  sudo -u nobody nohup python3 "$TPROXY_SCRIPT" >>"$TPROXY_LOG" 2>&1 &
   echo $! > "$TPROXY_PID"
   local i
   for i in $(seq 1 30); do
@@ -204,6 +220,7 @@ setup_transparent_proxy() {
   code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://dl.flathub.org/repo/summary.idx 2>/dev/null || true)"
   if [[ "$code" == "200" ]]; then
     log "Gate-Fetch OK (200) - Transparent-Pfad bewiesen."
+    dump_nat_state
     return 0
   fi
   warn "Gate-Fetch scheiterte (code=${code:-?}) - baue Redirect zurueck, weiter direkt."
@@ -241,6 +258,15 @@ fetch_url() {
 }
 
 [[ "$(id -u)" -eq 0 ]] || die "Bitte als root im Container ausfuehren."
+
+# iptables-NAT-Counter (pkts/bytes beweisen, ob der Redirect greift!)
+# + Forwarder-Log (zeigt jede Verbindung inkl. Dial-Ergebnis).
+dump_nat_state() {
+  echo "--- iptables nat OUTPUT (Counter!) ---" >&2
+  iptables -t nat -L OUTPUT -n -v --line-numbers >&2 2>/dev/null || echo "(kein iptables-Zugriff)" >&2
+  echo "--- tproxy.log (letzte 30) ---" >&2
+  tail -n 30 "$TPROXY_LOG" >&2 2>/dev/null || echo "(kein tproxy.log)" >&2
+}
 
 export DEBIAN_FRONTEND=noninteractive
 # C.UTF-8 ist in glibc eingebaut (kein locales-Paket, kein locale-gen noetig)
@@ -381,6 +407,7 @@ for attempt in 1 2; do
 done
 if [[ -z "$RUNTIME_OK" ]]; then
   warn "DIAGNOSE: volle Fetch-Protokolle (RC = Exit-Code, entscheidend!):"
+  dump_nat_state
   echo "--- getent ahosts dl.flathub.org (was sieht NSS JETZT?) ---" >&2
   getent ahosts dl.flathub.org >&2 || true
   echo "--- curl -v VOLLSTAENDIG (inkl. Transfer + RC) ---" >&2
