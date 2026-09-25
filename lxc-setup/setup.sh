@@ -144,7 +144,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl wget gnupg sudo dnsutils \
   flatpak \
   openbox xterm dbus-x11 \
-  openssl iproute2 \
+  openssl iproute2 iputils-ping iptables \
   python3 xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -213,6 +213,24 @@ pin_hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 log "Resolver-Check (muss die Pins zeigen, sonst wirkt /etc/hosts nicht):"
 getent hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio 2>&1 \
   | while IFS= read -r line; do echo "[resolve] $line"; done
+# MTU-Blackhole-Heilung (PPPoE 1492 vs. 1500): SYN (klein) + TLS-Handshake
+# passieren, grosse Datensegmente sterben unterwegs (PMTUD-ICMP gefiltert).
+# MSS-Clamp zwingt BEIDE Seiten zu kleineren Segmenten. Harmlos sonst.
+log "MTU-Probe (gross mit DF-Bit; Fehlschlag = Blackhole-Indiz):"
+ping -M do -s 1472 -c 2 -W 3 dl.flathub.org >/dev/null 2>&1 \
+  && log "  1472B ok (kein Blackhole)" \
+  || warn "  1472B scheitert -> aktiviere TCP-MSS-Clamping."
+if command -v iptables >/dev/null 2>&1; then
+  iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+    || iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+    || warn "  MSS-Clamp nicht setzbar (weiter ohne)."
+  iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+    && log "  TCP-MSS-Clamping aktiv." || true
+else
+  warn "  iptables fehlt (weiter ohne Clamp)."
+fi
+log "Interface-MTUs:"
+ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done
 use_clean_dns
 # Repo-Datei laden, dann LOKAL einhaengen (kein DNS zur Add-Zeit noetig).
 FLATHUB_ADDED=""
@@ -242,18 +260,23 @@ for attempt in 1 2; do
   [[ "$attempt" == "2" ]] || { warn "Runtime-Install Versuch 1 scheiterte -> Retry in 15s."; sleep 15; }
 done
 if [[ -z "$RUNTIME_OK" ]]; then
-  warn "DIAGNOSE: verbose Fetch-Versuche (zeigen IP-Familie + Handshake-Punkt):"
+  warn "DIAGNOSE: volle Fetch-Protokolle (RC = Exit-Code, entscheidend!):"
   echo "--- getent ahosts dl.flathub.org (was sieht NSS JETZT?) ---" >&2
   getent ahosts dl.flathub.org >&2 || true
-  echo "--- curl -v default (Trying/Connected/Fehler) ---" >&2
-  curl -v --max-time 15 -o /dev/null https://dl.flathub.org/repo/summary.idx 2>&1 \
-    | grep -E "Trying|Connected to|Couldn|error|resolve|SSL connection|subject|issuer" | head -20 >&2 || true
+  echo "--- curl -v VOLLSTAENDIG (inkl. Transfer + RC) ---" >&2
+  curl -v --max-time 25 -o /tmp/diag.bin https://dl.flathub.org/repo/summary.idx 2>&1 | head -60 >&2 || true
+  echo "--- curl -v --http1.1 (h2-Bypass-Variante) ---" >&2
+  curl -v --http1.1 --max-time 25 -o /tmp/diag11.bin https://dl.flathub.org/repo/summary.idx 2>&1 | head -40 >&2 || true
   echo "--- curl -v -4 erzwungen ---" >&2
-  curl -v -4 --max-time 15 -o /dev/null https://dl.flathub.org/repo/summary.idx 2>&1 \
-    | grep -E "Trying|Connected to|Couldn|error|resolve" | head -10 >&2 || true
-  echo "--- Routen ---" >&2
+  curl -v -4 --max-time 25 -o /dev/null https://dl.flathub.org/repo/summary.idx 2>&1 | head -40 >&2 || true
+  echo "--- grosse Datei-Test (zeigt Stall vs. Abbruch + Bytes) ---" >&2
+  RC_BIG=0
+  curl -s --max-time 30 -o /tmp/diag10.bin https://dl.flathub.org/repo/summary.idx 2>/dev/null || RC_BIG=$?
+  echo "RC-GROSS=${RC_BIG} SIZE=$(stat -c%s /tmp/diag10.bin 2>/dev/null || echo none)" >&2
+  rm -f /tmp/diag.bin /tmp/diag11.bin /tmp/diag10.bin
+  echo "--- Routen + MTU ---" >&2
   ip route >&2 || true
-  ip -6 route >&2 || true
+  ip -o link show >&2 || true
   die "Runtime-Installation fehlgeschlagen (s. Ausgabe + Diagnose oben)."
 fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
