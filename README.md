@@ -26,14 +26,14 @@ Das Script:
 ### Optionen (Env-Variablen)
 
 ```bash
-CTID=150 CPU=4 RAM=4096 DISK=15 VNC_PASSWORD=mein-passwort \
+CTID=150 CT_HOSTNAME=photon CPU=4 RAM=4096 DISK=15 VNC_PASSWORD=mein-passwort \
 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PhotonPhotoEditorProxmox/main/install/photon.sh)"
 ```
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
 | `CTID` | nächste freie ID | Container-ID (muss frei sein) |
-| `HOSTNAME` | `photon` | Container-Name |
+| `CT_HOSTNAME` | `photon` | Container-Name (bewusst nicht `HOSTNAME`, das ist auf dem Host der Node-Name) |
 | `CPU` / `RAM` / `DISK` | `2` / `2048` / `10` | vCPU / MB RAM / GB Disk |
 | `STORAGE` | `local-lvm` | Storage für RootFS |
 | `TEMPLATE_STORAGE` | `local` | Storage für LXC-Template |

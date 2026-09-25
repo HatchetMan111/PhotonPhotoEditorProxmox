@@ -6,7 +6,7 @@
 #   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PhotonPhotoEditorProxmox/main/install/photon.sh)"
 #
 # Optional env overrides:
-#   CTID=150 HOSTNAME=photon CPU=2 RAM=2048 DISK=10 STORAGE=local-lvm \
+#   CTID=150 CT_HOSTNAME=photon CPU=2 RAM=2048 DISK=10 STORAGE=local-lvm \
 #   TEMPLATE_STORAGE=local PASSWORD=secret VNC_PASSWORD=secret \
 #   bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/PhotonPhotoEditorProxmox/main/install/photon.sh)"
 #
@@ -32,7 +32,9 @@ DEFAULT_TEMPLATE_STORAGE="local"
 PORT=8080
 
 CTID="${CTID:-}"                          # empty => next free ID from cluster
-HOSTNAME="${HOSTNAME:-${APP}}"
+# Achtung: NICHT $HOSTNAME verwenden — auf dem PVE-Host ist das der
+# Node-Hostname (z. B. "Prox") und wuerde den Container falsch benennen.
+CT_HOSTNAME="${CT_HOSTNAME:-${APP}}"
 CPU="${CPU:-${DEFAULT_CPU}}"
 RAM="${RAM:-${DEFAULT_RAM}}"
 DISK="${DISK:-${DEFAULT_DISK}}"
@@ -55,9 +57,11 @@ fail() {
   echo "  Befehl    : ${BASH_COMMAND}" >&2
   echo "------------------------------------------------------------------" >&2
   echo "  Stacktrace (neueste zuerst):" >&2
-  local i
-  for (( i=${#FUNCNAME[@]}-1; i>=0; i-- )); do
-    echo "    at ${FUNCNAME[$i]:-main} (${BASH_SOURCE[$i]:-?}:${BASH_LINENO[$i]:-?})" >&2
+  local frame trace line func src
+  for (( frame=0; frame<25; frame++ )); do
+    trace="$(caller "$frame" 2>/dev/null)" || break
+    read -r line func src <<< "$trace"
+    echo "    at ${func:-?} (${src:-?}:${line:-?})" >&2
   done
   echo "------------------------------------------------------------------" >&2
   echo "  Tipp: Erneut mit DEBUG=1 starten fuer ein vollstaendiges bash -x Log:" >&2
@@ -87,17 +91,19 @@ next_free_ctid() {
 }
 
 resolve_template() {
+  # WICHTIG: Alles ausser dem finalen echo MUSS auf stderr,
+  # da der Aufrufer stdout per $(...) als Template-Pfad einfaengt.
   local tmpl_store="$1" os="$2" tpl
-  log "Aktualisiere Template-DB (${tmpl_store}) ..."
-  pveam update >/dev/null
+  log "Aktualisiere Template-DB (${tmpl_store}) ..." >&2
+  pveam update >/dev/null 2>&1
   tpl="$(pveam available --section system 2>/dev/null \
     | awk -v os="$os" '$2 ~ os {print $2}' | sort -V | tail -n 1 || true)"
   [[ -n "${tpl:-}" ]] || die "Kein LXC-Template fuer '${os}' auf Storage '${tmpl_store}' gefunden."
   if ! pveam list "${tmpl_store}" 2>/dev/null | grep -q "${tpl}"; then
-    log "Lade Template ${tpl} herunter (kann dauern) ..."
-    pveam download "${tmpl_store}" "${tpl}"
+    log "Lade Template ${tpl} herunter (kann dauern) ..." >&2
+    pveam download "${tmpl_store}" "${tpl}" >&2
   else
-    log "Template ${tpl} bereits vorhanden."
+    log "Template ${tpl} bereits vorhanden." >&2
   fi
   echo "${tmpl_store}:vztmpl/${tpl}"
 }
@@ -131,11 +137,12 @@ if pct status "$CTID" >/dev/null 2>&1; then
 fi
 
 OSTPL="$(resolve_template "$TEMPLATE_STORAGE" "$DEFAULT_OS")"
-log "Erstelle Container ${CTID} (${HOSTNAME}, ${CPU} vCPU, ${RAM} MB RAM, ${DISK} GB Disk) ..."
+[[ "$OSTPL" == *":vztmpl/"* ]] || die "Unerwarteter Template-Pfad: '${OSTPL}'"
+log "Erstelle Container ${CTID} (${CT_HOSTNAME}, ${CPU} vCPU, ${RAM} MB RAM, ${DISK} GB Disk) ..."
 
 CREATE_ARGS=(
   "$CTID" "$OSTPL"
-  --hostname "$HOSTNAME"
+  --hostname "$CT_HOSTNAME"
   --cores "$CPU"
   --memory "$RAM"
   --rootfs "${STORAGE}:${DISK}"
@@ -185,7 +192,7 @@ echo ""
 echo "=================================================================="
 echo "  ${APP_NAME} erfolgreich installiert!"
 echo "  ----------------------------------------------------------------"
-echo "  Container : CT ${CTID} (${HOSTNAME})"
+echo "  Container : CT ${CTID} (${CT_HOSTNAME})"
 echo "  Web-Desktop: http://${IP}:${PORT}"
 if [[ -n "${SAVED_PW:-}" ]]; then
 echo "  VNC-Passwort (in CT /root/.photon_vnc_password gespeichert): ${SAVED_PW}"
