@@ -48,18 +48,19 @@ die()  { echo -e "\033[1;31m[photon-setup FEHLER]\033[0m $*" >&2; exit 1; }
 [[ "$(id -u)" -eq 0 ]] || die "Bitte als root im Container ausfuehren."
 
 export DEBIAN_FRONTEND=noninteractive
+# C.UTF-8 ist in glibc eingebaut (kein locales-Paket, kein locale-gen noetig)
+# und verhindert die perl/locale-Warnflut im minimalen LXC-Template.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 # ------------------------------------------------------------ 1) Basis --
 log "1/7 System aktualisieren + Abhaengigkeiten installieren ..."
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates curl wget gnupg sudo locales \
+  ca-certificates curl wget gnupg sudo \
   flatpak \
   openbox xterm dbus-x11 \
   openssl iproute2 \
   python3 xz-utils
-locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
@@ -88,8 +89,13 @@ for attempt in 1 2 3; do
   [[ "$attempt" == "3" ]] && die "KasmVNC-Download fehlgeschlagen: ${KASM_URL}"
   sleep 5
 done
-dpkg -i "/tmp/${KASM_DEB}" || apt-get install -yf --no-install-recommends
-dpkg -i "/tmp/${KASM_DEB}" || die "KasmVNC-Installation fehlgeschlagen."
+# Abhaengigkeiten (libgbm1, libgl1, libxfont2, perl-Module, ...) aus den
+# Repos aufloesen. dpkg allein kann das nicht; `apt-get install -yf` ohne
+# Paketargument wuerde kasmvncserver eher ENTFERNEN statt Deps zu holen.
+# Achtung: Schritt 1 hat /var/lib/apt/lists/* geloescht -> update Pflicht.
+apt-get update
+apt-get install -y --no-install-recommends "/tmp/${KASM_DEB}" \
+  || die "KasmVNC-Installation fehlgeschlagen (Abhaengigkeiten nicht aufloesbar?)."
 rm -f "/tmp/${KASM_DEB}"
 command -v kasmvncserver >/dev/null 2>&1 || die "kasmvncserver nach Installation nicht gefunden."
 VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"

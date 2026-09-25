@@ -57,12 +57,14 @@ fail() {
   echo "  Befehl    : ${BASH_COMMAND}" >&2
   echo "------------------------------------------------------------------" >&2
   echo "  Stacktrace (neueste zuerst):" >&2
-  local frame trace line func src
+  local frame trace line func src printed=0
   for (( frame=0; frame<25; frame++ )); do
     trace="$(caller "$frame" 2>/dev/null)" || break
     read -r line func src <<< "$trace"
     echo "    at ${func:-?} (${src:-?}:${line:-?})" >&2
+    printed=$((printed + 1))
   done
+  [[ "$printed" -gt 0 ]] || echo "    (Top-Level-Fehler, siehe 'Befehl' oben)" >&2
   echo "------------------------------------------------------------------" >&2
   echo "  Tipp: Erneut mit DEBUG=1 starten fuer ein vollstaendiges bash -x Log:" >&2
   echo "    DEBUG=1 bash -c \"\$(wget -qLO - https://raw.githubusercontent.com/${REPO}/${BRANCH}/install/photon.sh)\"" >&2
