@@ -36,8 +36,9 @@ fail() {
   echo "------------------------------------------------------------------" >&2
   echo "  Relevante Logs:" >&2
   journalctl -u kasmvnc -n 50 --no-pager 2>/dev/null || true
-  # Falls Clean-DNS aktiv war, Original wiederherstellen (Funktion ggf. spaeter definiert).
+  # Falls Clean-DNS aktiv war, Original wiederherstellen; Proxy stoppen.
   if declare -F restore_dns >/dev/null 2>&1; then restore_dns >/dev/null 2>&1 || true; fi
+  if declare -F stop_local_proxy >/dev/null 2>&1; then stop_local_proxy >/dev/null 2>&1 || true; fi
   echo "==================================================================" >&2
   exit "${rc}"
 }
@@ -99,6 +100,95 @@ pin_hosts() {
       warn "  ${h}: keine IPv4 via 1.1.1.1 (UDP/53 outbound blockiert?)"
     fi
   done
+}
+
+# Lokaler CONNECT-Proxy (127.0.0.1:8888, reines Python-Stdlib, kein MITM:
+# TLS laeuft Ende-zu-Ende durch, der Proxy schaufelt nur Bytes).
+# Zweck: Falls flatpak seine TCP-Sockets selbst kaputt aufbaut (Happy-Eyeballs-
+# Bug o. ae.), umgeht der Proxy NUR den Socket-Aufbau — SNI/IP/Bytes identisch.
+# Damit ist er gleichzeitig Fix-Kandidat UND Diagnose (geht's per Proxy,
+# lag es am Establishment; geht's nicht, liegt es an den Bytes).
+PROXY_PORT="8888"
+PROXY_PIDFILE="/tmp/photon-proxy.pid"
+start_local_proxy() {
+  cat > /root/photon-proxy.py <<'PYEOF'
+import socket, threading
+LISTEN = ("127.0.0.1", 8888)
+def pipe(a, b):
+    try:
+        while True:
+            d = a.recv(65536)
+            if not d:
+                break
+            b.sendall(d)
+    except OSError:
+        pass
+    finally:
+        for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+def handle(c):
+    try:
+        req = b""
+        while b"\r\n\r\n" not in req:
+            chunk = c.recv(4096)
+            if not chunk:
+                c.close()
+                return
+            req += chunk
+        line = req.split(b"\r\n", 1)[0].decode("latin1")
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "CONNECT":
+            c.close()
+            return
+        host, _, port = parts[1].partition(":")
+        s = socket.create_connection((host, int(port or 443)), timeout=15)
+        c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        t1 = threading.Thread(target=pipe, args=(c, s), daemon=True)
+        t2 = threading.Thread(target=pipe, args=(s, c), daemon=True)
+        t1.start(); t2.start(); t1.join(); t2.join()
+    except Exception:
+        pass
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(LISTEN)
+srv.listen(50)
+print("proxy ready", flush=True)
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+PYEOF
+  nohup python3 /root/photon-proxy.py >/tmp/proxy.log 2>&1 &
+  echo $! > "$PROXY_PIDFILE"
+  local i
+  for i in $(seq 1 30); do
+    if (echo > "/dev/tcp/127.0.0.1/${PROXY_PORT}") 2>/dev/null; then
+      log "Local-Proxy laeuft (127.0.0.1:${PROXY_PORT})."
+      return 0
+    fi
+    sleep 1
+  done
+  warn "Local-Proxy startet nicht (s. /tmp/proxy.log)."
+  return 1
+}
+stop_local_proxy() {
+  if [[ -f "$PROXY_PIDFILE" ]]; then
+    kill "$(cat "$PROXY_PIDFILE")" 2>/dev/null || true
+    rm -f "$PROXY_PIDFILE"
+  fi
+}
+# flatpak mit Proxy-Env (inline, ohne globale Seiteneffekte auf curl).
+fp() {
+  https_proxy="http://127.0.0.1:${PROXY_PORT}" http_proxy="http://127.0.0.1:${PROXY_PORT}" \
+  HTTPS_PROXY="http://127.0.0.1:${PROXY_PORT}" HTTP_PROXY="http://127.0.0.1:${PROXY_PORT}" \
+    flatpak "$@"
 }
 
 # Original-resolv.conf sichern, sauberes DNS (1.1.1.1) TEMPORAER aktivieren.
@@ -192,6 +282,12 @@ FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
 FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
 FLATHUB_RUNTIME="org.freedesktop.Platform/x86_64/25.08"
 netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
+log "HTTP-Stack-Fingerabdruck (welche TLS-Lib nutzt flatpak?):"
+ldd /usr/bin/flatpak 2>/dev/null | grep -Eo "lib(curl|soup|ssl|crypto)[^ ]*" | sort -u \
+  | while IFS= read -r line; do echo "[stack] $line"; done
+log "Python-HTTPS-Probe (teilt sich NICHT curls Stack):"
+python3 -c "import urllib.request; r=urllib.request.urlopen('https://dl.flathub.org/repo/summary.idx',timeout=20); d=r.read(); print(f'PY-HTTPS: status={r.status} bytes={len(d)}')" 2>&1 \
+  | while IFS= read -r line; do echo "[pyhttps] $line"; done || true
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
 if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
@@ -232,15 +328,19 @@ fi
 log "Interface-MTUs:"
 ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done
 use_clean_dns
+# Local-Proxy starten: flatpak tunnelt dadurch (Bypass NUR fuer dessen
+# Socket-Aufbau; curl/python laufen weiter direkt). Siehe Helper-Kommentar.
+PROXY_UP=""
+if start_local_proxy; then PROXY_UP=1; else warn "Weiter ohne Proxy (direkt)."; fi
 # Repo-Datei laden, dann LOKAL einhaengen (kein DNS zur Add-Zeit noetig).
 FLATHUB_ADDED=""
 for attempt in 1 2 3; do
   if fetch_url "$FLATHUB_REPO_URL" "$FLATHUB_REPO_FILE" \
-    && flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then
+    && fp remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then
     FLATHUB_ADDED=1; break
   fi
   # Letzter Ausweg: direkt (flatpak loest selbst auf).
-  if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
+  if fp remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
   [[ "$attempt" == "3" ]] || sleep 10
 done
 rm -f "$FLATHUB_REPO_FILE"
@@ -256,7 +356,7 @@ fi
 log "Installiere Runtime ${FLATHUB_RUNTIME} von Flathub ..."
 RUNTIME_OK=""
 for attempt in 1 2; do
-  if flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME"; then RUNTIME_OK=1; break; fi
+  if fp install -y --noninteractive flathub "$FLATHUB_RUNTIME"; then RUNTIME_OK=1; break; fi
   [[ "$attempt" == "2" ]] || { warn "Runtime-Install Versuch 1 scheiterte -> Retry in 15s."; sleep 15; }
 done
 if [[ -z "$RUNTIME_OK" ]]; then
@@ -295,9 +395,10 @@ fi
 [[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak fehlt/leer: ${PHOTON_FLATPAK}"
 # (Volle Ausgabe, keine Kuerzung: komplette Fehlerkette ist Pflicht.)
 log "Installiere Photon-Bundle (Runtime bereits vorhanden) ..."
-flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
+fp install -y --noninteractive "$PHOTON_FLATPAK" \
   || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
 rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
+stop_local_proxy
 restore_dns
 log "Hinweis: /etc/hosts-Pins bleiben bestehen (sonst brechen spaetere flatpak-Updates am LAN-Filter)."
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
