@@ -82,6 +82,25 @@ for host in sys.argv[1:]:
 PYEOF
 }
 
+# Kritische Hosts per Direkt-DNS (1.1.1.1) aufloesen und in /etc/hosts
+# pinnen. Umgeht filternde/wackelige LAN-Resolver (Pi-hole) fuer JEDES Tool
+# (curl, flatpak, python) — unabhaengig von nsswitch/systemd-resolved.
+# Pins bleiben bewusst bestehen (sonst brechen spaetere flatpak-Updates).
+pin_hosts() {
+  log "Pinne kritische Hosts via 1.1.1.1 nach /etc/hosts ..."
+  local h ip
+  for h in "$@"; do
+    ip="$(dig +short A "$h" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+    if [[ -n "$ip" ]]; then
+      sed -i "/[[:space:]]${h}[[:space:]]*\(#.*\)\?$/d" /etc/hosts
+      echo "${ip} ${h} # photon-pinned" >> /etc/hosts
+      log "  ${h} -> ${ip}"
+    else
+      warn "  ${h}: keine IPv4 via 1.1.1.1 (UDP/53 outbound blockiert?)"
+    fi
+  done
+}
+
 # Original-resolv.conf sichern, sauberes DNS (1.1.1.1) TEMPORAER aktivieren.
 # Wird nach den Downloads wiederhergestellt (LAN-DNS bleibt Standard).
 use_clean_dns() {
@@ -122,7 +141,7 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 log "1/7 System aktualisieren + Abhaengigkeiten installieren ..."
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates curl wget gnupg sudo \
+  ca-certificates curl wget gnupg sudo dnsutils \
   flatpak \
   openbox xterm dbus-x11 \
   openssl iproute2 \
@@ -168,9 +187,10 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 [[ -n "$VNCPASSWD_BIN" ]] || die "Weder kasmvncpasswd noch vncpasswd gefunden."
 
 # -------------------------------------------------------- 4) Photon ----
-log "4/7 Photon Studio (Flatpak, ~270 MB) herunterladen + installieren ..."
+log "4/7 Photon Studio (Flatpak, ~270 MB + Runtime) herunterladen + installieren ..."
 FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
 FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
+FLATHUB_RUNTIME="org.freedesktop.Platform/x86_64/25.08"
 netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
@@ -178,8 +198,11 @@ if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; th
   warn "IPv6 zu Flathub defekt/langsam -> bevorzuge IPv4 (gai.conf)."
   printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
 fi
-# Repo-Datei laden (mit Clean-DNS-Bypass bei Filter), dann LOKAL einhaengen —
-# flatpak muss zum Add-Zeitpunkt nichts mehr aufloesen.
+# Hosts pinnen (wirkt fuer curl, flatpak, python — unabhaengig vom Resolver)
+# + Clean-DNS EINMAL fuer den ganzen Schritt (statt pro Fetch zu jonglieren).
+pin_hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
+use_clean_dns
+# Repo-Datei laden, dann LOKAL einhaengen (kein DNS zur Add-Zeit noetig).
 FLATHUB_ADDED=""
 for attempt in 1 2 3; do
   if fetch_url "$FLATHUB_REPO_URL" "$FLATHUB_REPO_FILE" \
@@ -193,11 +216,16 @@ done
 rm -f "$FLATHUB_REPO_FILE"
 if [[ -z "$FLATHUB_ADDED" ]]; then
   warn "Flathub-Remote 3x fehlgeschlagen."
-  echo "--- HINWEIS: Resolver im Container filtern ggf. (Pi-hole/AdGuard):" >&2
-  echo "    dort im Query-Log nach flathub.org / dl.flathub.org suchen," >&2
-  echo "    ggf. whitelisten." >&2
+  echo "--- HINWEIS: Pi-hole/AdGuard whitelisten:" >&2
+  echo "    flathub.org, dl.flathub.org, tenzen.studio, downloads.tenzen.studio" >&2
   die "Flathub-Remote nicht erreichbar (s. [netcheck]-Zeilen oben)."
 fi
+# Laufzeitumgebung EXPLIZIT vorab installieren (gross, dauert Minuten):
+# Das Bundle verlangt sie, und so schlaegt ein Metadata-Problem sofort
+# sichtbar hier auf statt verzoegert im Bundle-Install.
+log "Installiere Runtime ${FLATHUB_RUNTIME} von Flathub ..."
+flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME" \
+  || die "Runtime-Installation fehlgeschlagen (s. Ausgabe oben)."
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
 if [[ "${PHOTON_PRESEEDED:-}" == "1" ]]; then
   # Host hat die Datei per pct push nach /root/photon-studio.flatpak gelegt.
@@ -212,19 +240,13 @@ else
   done
 fi
 [[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak fehlt/leer: ${PHOTON_FLATPAK}"
-# Runtime-Deps kommen von Flathub -> bei Filter Clean-DNS temporaer aktivieren.
 # (Volle Ausgabe, keine Kuerzung: komplette Fehlerkette ist Pflicht.)
-FLATPAK_OK=""
-if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then FLATPAK_OK=1; fi
-if [[ -z "$FLATPAK_OK" ]]; then
-  warn "Flatpak-Install scheiterte -> Retry mit Clean-DNS-Bypass."
-  use_clean_dns
-  if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then FLATPAK_OK=1; fi
-  restore_dns
-fi
-[[ -n "$FLATPAK_OK" ]] || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
+log "Installiere Photon-Bundle (Runtime bereits vorhanden) ..."
+flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
+  || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
 rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
 restore_dns
+log "Hinweis: /etc/hosts-Pins bleiben bestehen (sonst brechen spaetere flatpak-Updates am LAN-Filter)."
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
 [[ -n "$PHOTON_APP_ID" ]] || die "Photon Flatpak-App-ID nach Installation nicht gefunden. 'flatpak list --app' Ausgabe pruefen."
 log "Photon App-ID: ${PHOTON_APP_ID}"
