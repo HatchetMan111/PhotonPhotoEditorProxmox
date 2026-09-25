@@ -175,11 +175,28 @@ pct push "$CTID" "$TMP_SETUP" /root/photon-setup.sh
 pct push "$CTID" "$TMP_UNIT" /root/kasmvnc.service
 rm -f "$TMP_SETUP" "$TMP_UNIT"
 
+# Photon-Flatpak (~270 MB) VORAB auf dem Host laden und per pct push
+# in den Container legen. Falls das Container-DNS filtert (Pi-hole),
+# umgeht das den Download im Container komplett.
+PHOTON_API_URL="https://tenzen.studio/api/v1/photon/download?platform=linux&arch=x64"
+PHOTON_PRESEEDED=""
+TMP_PHOTON="$(mktemp /tmp/photon-studio.XXXXXX.flatpak)"
+log "Versuche Photon-Flatpak auf dem Host zu laden (Preseed) ..."
+if curl -fsSL --retry 2 --max-time 300 -o "$TMP_PHOTON" "$PHOTON_API_URL" 2>/dev/null \
+  && [[ -s "$TMP_PHOTON" ]]; then
+  pct push "$CTID" "$TMP_PHOTON" /root/photon-studio.flatpak
+  PHOTON_PRESEEDED=1
+  log "Preseed ok ($(du -h "$TMP_PHOTON" | cut -f1)) - Container ueberspringt den Download."
+else
+  warn "Host-Download fehlgeschlagen - Container versucht es selbst (mit DNS-Bypass)."
+fi
+rm -f "$TMP_PHOTON"
+
 log "Installiere ${APP_NAME} im Container (dauert mehrere Minuten: ~270 MB Download + Flatpak) ..."
 if [[ -n "$VNC_PASSWORD" ]]; then
-  pct exec "$CTID" -- env VNC_PASSWORD="$VNC_PASSWORD" PORT="$PORT" bash /root/photon-setup.sh
+  pct exec "$CTID" -- env VNC_PASSWORD="$VNC_PASSWORD" PORT="$PORT" PHOTON_PRESEEDED="$PHOTON_PRESEEDED" bash /root/photon-setup.sh
 else
-  pct exec "$CTID" -- env PORT="$PORT" bash /root/photon-setup.sh
+  pct exec "$CTID" -- env PORT="$PORT" PHOTON_PRESEEDED="$PHOTON_PRESEEDED" bash /root/photon-setup.sh
 fi
 
 log "Verifiziere Installation ..."

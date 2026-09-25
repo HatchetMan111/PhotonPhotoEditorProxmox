@@ -36,6 +36,8 @@ fail() {
   echo "------------------------------------------------------------------" >&2
   echo "  Relevante Logs:" >&2
   journalctl -u kasmvnc -n 50 --no-pager 2>/dev/null || true
+  # Falls Clean-DNS aktiv war, Original wiederherstellen (Funktion ggf. spaeter definiert).
+  if declare -F restore_dns >/dev/null 2>&1; then restore_dns >/dev/null 2>&1 || true; fi
   echo "==================================================================" >&2
   exit "${rc}"
 }
@@ -44,6 +46,70 @@ trap fail ERR
 log()  { echo -e "\033[1;32m[photon-setup]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[photon-setup WARN]\033[0m $*" >&2; }
 die()  { echo -e "\033[1;31m[photon-setup FEHLER]\033[0m $*" >&2; exit 1; }
+
+# ------------------------------------------- DNS-Diagnose + Bypass --
+RESOLV_BAK="/tmp/resolv.conf.photon-bak"
+
+# Pro Host: A/AAAA-Adressen + TCP-443-Connect je Familie (mit Timing).
+# Deckt DNS-Filter (Pi-hole: 0.0.0.0 -> instant Error 7) und v6-Defekte auf.
+netcheck() {
+  log "Netz-Check (DNS + TCP/443 je Adressfamilie) ..."
+  python3 - "$@" <<'PYEOF' 2>&1 | while IFS= read -r line; do echo "[netcheck] $line"; done
+import socket, sys, time
+for host in sys.argv[1:]:
+    try:
+        infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except Exception as e:
+        print(f"{host}: RESOLVE-FAIL {e}")
+        continue
+    seen = []
+    for fam, _, _, _, sa in infos:
+        ip = sa[0]
+        if ip in seen:
+            continue
+        seen.append(ip)
+        famname = "v4" if fam == socket.AF_INET else "v6"
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        s.settimeout(5)
+        t = time.time()
+        try:
+            s.connect(sa)
+            print(f"{host} [{famname} {ip}]: CONNECT-OK {(time.time()-t)*1000:.0f}ms")
+        except Exception as e:
+            print(f"{host} [{famname} {ip}]: CONNECT-FAIL {e}")
+        finally:
+            s.close()
+PYEOF
+}
+
+# Original-resolv.conf sichern, sauberes DNS (1.1.1.1) TEMPORAER aktivieren.
+# Wird nach den Downloads wiederhergestellt (LAN-DNS bleibt Standard).
+use_clean_dns() {
+  [[ -f "$RESOLV_BAK" ]] || cp /etc/resolv.conf "$RESOLV_BAK"
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+  log "Temporaer sauberes DNS (1.1.1.1/8.8.8.8) aktiv - wird wiederhergestellt."
+}
+restore_dns() {
+  if [[ -f "$RESOLV_BAK" ]]; then
+    cp "$RESOLV_BAK" /etc/resolv.conf && rm -f "$RESOLV_BAK"
+    log "Original-DNS wiederhergestellt."
+  fi
+}
+
+# Datei laden: erst Standard-DNS (-4, dann dual), dann Clean-DNS-Bypass.
+# -L folgt Redirects (Tenzen-API -> 302 auf Version). $1=URL $2=Ziel. RC 0 ok.
+fetch_url() {
+  local url="$1" out="$2"
+  if curl -4 -fsSL --retry 2 --max-time 120 -o "$out" "$url" 2>/dev/null; then return 0; fi
+  if curl -fsSL --retry 2 --max-time 120 -o "$out" "$url" 2>/dev/null; then return 0; fi
+  warn "Standard-DNS scheitert fuer ${url} -> versuche Clean-DNS-Bypass."
+  use_clean_dns
+  if curl -4 -fsSL --retry 2 --max-time 120 -o "$out" "$url" 2>/dev/null \
+    || curl -fsSL --retry 2 --max-time 120 -o "$out" "$url" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
 
 [[ "$(id -u)" -eq 0 ]] || die "Bitte als root im Container ausfuehren."
 
@@ -103,21 +169,22 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 
 # -------------------------------------------------------- 4) Photon ----
 log "4/7 Photon Studio (Flatpak, ~270 MB) herunterladen + installieren ..."
-FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
-FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
+netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
 if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
   warn "IPv6 zu Flathub defekt/langsam -> bevorzuge IPv4 (gai.conf)."
   printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
 fi
-# Repo-Datei per curl holen (mit -4 zuerst: Container-IPv4 ist bewiesen),
-# dann LOKAL einhaengen — flatpak muss dafuer nichts mehr aufloesen.
+FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
+FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
+# Repo-Datei laden (mit Clean-DNS-Bypass bei Filter), dann LOKAL einhaengen —
+# flatpak muss zum Add-Zeitpunkt nichts mehr aufloesen.
 FLATHUB_ADDED=""
 for attempt in 1 2 3; do
-  if curl -4 -fsSL --retry 2 --max-time 30 -o "$FLATHUB_REPO_FILE" "$FLATHUB_REPO_URL" 2>/dev/null \
-    || curl -fsSL --retry 2 --max-time 30 -o "$FLATHUB_REPO_FILE" "$FLATHUB_REPO_URL" 2>/dev/null; then
-    if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then FLATHUB_ADDED=1; break; fi
+  if fetch_url "$FLATHUB_REPO_URL" "$FLATHUB_REPO_FILE" \
+    && flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_FILE"; then
+    FLATHUB_ADDED=1; break
   fi
   # Letzter Ausweg: direkt (flatpak loest selbst auf).
   if flatpak remote-add --if-not-exists flathub "$FLATHUB_REPO_URL"; then FLATHUB_ADDED=1; break; fi
@@ -125,31 +192,39 @@ for attempt in 1 2 3; do
 done
 rm -f "$FLATHUB_REPO_FILE"
 if [[ -z "$FLATHUB_ADDED" ]]; then
-  warn "Flathub-Remote 3x fehlgeschlagen. DNS-Diagnose:"
-  echo "--- /etc/resolv.conf ---" >&2; cat /etc/resolv.conf >&2 || true
-  echo "--- getent ahosts flathub.org (v4+v6) ---" >&2; getent ahosts flathub.org >&2 || true
-  echo "--- curl -4 Probe ---" >&2; curl -4 -sSI --max-time 10 "$FLATHUB_REPO_URL" >&2 | head -3 || true
-  echo "--- curl -6 Probe ---" >&2; curl -6 -sSI --max-time 10 "$FLATHUB_REPO_URL" >&2 | head -3 || true
-  echo "--- HINWEIS: Resolver .111 sieht nach Pi-hole/AdGuard aus:" >&2
+  warn "Flathub-Remote 3x fehlgeschlagen."
+  echo "--- HINWEIS: Resolver im Container filtern ggf. (Pi-hole/AdGuard):" >&2
   echo "    dort im Query-Log nach flathub.org / dl.flathub.org suchen," >&2
-  echo "    ggf. whitelisten. Oder Container-DNS auf 1.1.1.1 testen." >&2
-  die "Flathub-Remote nicht erreichbar. Netzwerk/DNS im Container pruefen (s. Diagnose oben)."
+  echo "    ggf. whitelisten." >&2
+  die "Flathub-Remote nicht erreichbar (s. [netcheck]-Zeilen oben)."
 fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
-for attempt in 1 2 3; do
-  # -L folgt dem 302-Redirect der Tenzen-API auf die aktuellste Version.
-  if curl -fsSL --retry 3 -o "$PHOTON_FLATPAK" "$PHOTON_API_URL"; then break; fi
-  [[ "$attempt" == "3" ]] && die "Photon-Download fehlgeschlagen: ${PHOTON_API_URL}"
-  sleep 5
-done
-[[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak ist leer - Download unvollstaendig."
-# Runtime-Deps kommen von Flathub -> ebenfalls Retry (Netz kann wackeln).
-for attempt in 1 2 3; do
-  if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then break; fi
-  [[ "$attempt" == "3" ]] && die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
-  sleep 10
-done
-rm -f "$PHOTON_FLATPAK"
+if [[ "${PHOTON_PRESEEDED:-}" == "1" ]]; then
+  # Host hat die Datei per pct push nach /root/photon-studio.flatpak gelegt.
+  PHOTON_FLATPAK="/root/photon-studio.flatpak"
+  log "Nutze Host-Preseed: ${PHOTON_FLATPAK}"
+else
+  for attempt in 1 2 3; do
+    # -L (in fetch_url) folgt dem 302-Redirect der Tenzen-API auf die Version.
+    if fetch_url "$PHOTON_API_URL" "$PHOTON_FLATPAK"; then break; fi
+    [[ "$attempt" == "3" ]] && die "Photon-Download fehlgeschlagen: ${PHOTON_API_URL} (s. [netcheck]-Zeilen oben)"
+    sleep 5
+  done
+fi
+[[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak fehlt/leer: ${PHOTON_FLATPAK}"
+# Runtime-Deps kommen von Flathub -> bei Filter Clean-DNS temporaer aktivieren.
+# (Volle Ausgabe, keine Kuerzung: komplette Fehlerkette ist Pflicht.)
+FLATPAK_OK=""
+if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then FLATPAK_OK=1; fi
+if [[ -z "$FLATPAK_OK" ]]; then
+  warn "Flatpak-Install scheiterte -> Retry mit Clean-DNS-Bypass."
+  use_clean_dns
+  if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then FLATPAK_OK=1; fi
+  restore_dns
+fi
+[[ -n "$FLATPAK_OK" ]] || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
+rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
+restore_dns
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
 [[ -n "$PHOTON_APP_ID" ]] || die "Photon Flatpak-App-ID nach Installation nicht gefunden. 'flatpak list --app' Ausgabe pruefen."
 log "Photon App-ID: ${PHOTON_APP_ID}"
