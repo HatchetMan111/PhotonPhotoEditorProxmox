@@ -197,10 +197,22 @@ netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
   warn "IPv6 zu Flathub defekt/langsam -> bevorzuge IPv4 (gai.conf)."
   printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+  # Harter Schnitt (best effort): v6 ist hier nachweislich zu 100 % tot
+  # (alle v6-Connects Errno 101) — abschalten killt v6-first-Roulette
+  # in JEDEM Tool (auch solchen, die gai.conf ignorieren).
+  if sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1; then
+    echo "net.ipv6.conf.all.disable_ipv6=1" > /etc/sysctl.d/99-photon-ipv6.conf
+    log "IPv6 deaktiviert (war ohnehin unreachable)."
+  else
+    warn "IPv6 konnte nicht deaktiviert werden (weiter mit gai.conf)."
+  fi
 fi
 # Hosts pinnen (wirkt fuer curl, flatpak, python — unabhaengig vom Resolver)
 # + Clean-DNS EINMAL fuer den ganzen Schritt (statt pro Fetch zu jonglieren).
 pin_hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
+log "Resolver-Check (muss die Pins zeigen, sonst wirkt /etc/hosts nicht):"
+getent hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio 2>&1 \
+  | while IFS= read -r line; do echo "[resolve] $line"; done
 use_clean_dns
 # Repo-Datei laden, dann LOKAL einhaengen (kein DNS zur Add-Zeit noetig).
 FLATHUB_ADDED=""
@@ -224,8 +236,26 @@ fi
 # Das Bundle verlangt sie, und so schlaegt ein Metadata-Problem sofort
 # sichtbar hier auf statt verzoegert im Bundle-Install.
 log "Installiere Runtime ${FLATHUB_RUNTIME} von Flathub ..."
-flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME" \
-  || die "Runtime-Installation fehlgeschlagen (s. Ausgabe oben)."
+RUNTIME_OK=""
+for attempt in 1 2; do
+  if flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME"; then RUNTIME_OK=1; break; fi
+  [[ "$attempt" == "2" ]] || { warn "Runtime-Install Versuch 1 scheiterte -> Retry in 15s."; sleep 15; }
+done
+if [[ -z "$RUNTIME_OK" ]]; then
+  warn "DIAGNOSE: verbose Fetch-Versuche (zeigen IP-Familie + Handshake-Punkt):"
+  echo "--- getent ahosts dl.flathub.org (was sieht NSS JETZT?) ---" >&2
+  getent ahosts dl.flathub.org >&2 || true
+  echo "--- curl -v default (Trying/Connected/Fehler) ---" >&2
+  curl -v --max-time 15 -o /dev/null https://dl.flathub.org/repo/summary.idx 2>&1 \
+    | grep -E "Trying|Connected to|Couldn|error|resolve|SSL connection|subject|issuer" | head -20 >&2 || true
+  echo "--- curl -v -4 erzwungen ---" >&2
+  curl -v -4 --max-time 15 -o /dev/null https://dl.flathub.org/repo/summary.idx 2>&1 \
+    | grep -E "Trying|Connected to|Couldn|error|resolve" | head -10 >&2 || true
+  echo "--- Routen ---" >&2
+  ip route >&2 || true
+  ip -6 route >&2 || true
+  die "Runtime-Installation fehlgeschlagen (s. Ausgabe + Diagnose oben)."
+fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
 if [[ "${PHOTON_PRESEEDED:-}" == "1" ]]; then
   # Host hat die Datei per pct push nach /root/photon-studio.flatpak gelegt.
