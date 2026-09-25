@@ -1,0 +1,23 @@
+# kasmvnc.service — KasmVNC Web-Desktop fuer Photon Studio (LXC).
+#
+# Platzhalter {{USER}} und {{PORT}} werden von lxc-setup/setup.sh ersetzt.
+# Danach: systemctl enable --now kasmvnc  →  http://[LXC-IP]:{{PORT}}
+[Unit]
+Description=KasmVNC Web Desktop (Photon Studio)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+PAMName=login
+WorkingDirectory=/home/{{USER}}
+Environment=HOME=/home/{{USER}}
+# X-Session kommt aus ~/.vnc/xstartup (openbox-session + Photon-Autostart).
+ExecStart=/usr/bin/kasmvncserver :1 -interface 0.0.0.0 -httpPort {{PORT}} -FrameRate 30 -depth 24 -geometry 1920x1080
+ExecStop=/usr/bin/kasmvncserver -kill :1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
