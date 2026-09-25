@@ -36,9 +36,10 @@ fail() {
   echo "------------------------------------------------------------------" >&2
   echo "  Relevante Logs:" >&2
   journalctl -u kasmvnc -n 50 --no-pager 2>/dev/null || true
-  # Falls Clean-DNS aktiv war, Original wiederherstellen; Proxy stoppen.
+  # Falls Clean-DNS/DNS-Filter aktiv war, Original wiederherstellen; Proxys stoppen.
   if declare -F restore_dns >/dev/null 2>&1; then restore_dns >/dev/null 2>&1 || true; fi
   if declare -F stop_transparent_proxy >/dev/null 2>&1; then stop_transparent_proxy >/dev/null 2>&1 || true; fi
+  if declare -F stop_dns_filter >/dev/null 2>&1; then stop_dns_filter >/dev/null 2>&1 || true; fi
   echo "==================================================================" >&2
   exit "${rc}"
 }
@@ -242,6 +243,141 @@ restore_dns() {
   fi
 }
 
+# DNS-Filter (127.0.0.1:53): leitet an 1.1.1.1 weiter, entfernt aber ALLE
+# AAAA-Antworten (NODATA). Danach KANN kein Resolver mehr v6-first
+# versuchen — egal ob glibc, c-ares oder glib-eigene Sortierung. Heilt die
+# Root-Ursache, falls flatpak v6-first-ohne-Fallback stirbt ([7], 0 Pakete).
+DNSFILTER_PID="/tmp/photon-dnsfilter.pid"
+DNSFILTER_SCRIPT="/tmp/photon-dnsfilter.py"
+DNSFILTER_LOG="/tmp/dnsfilter.log"
+start_dns_filter() {
+  cat > "$DNSFILTER_SCRIPT" <<'PYEOF'
+import socket, struct, threading
+UP = ("1.1.1.1", 53)
+def qtype_of(data):
+    try:
+        if len(data) < 12:
+            return None
+        if struct.unpack("!H", data[4:6])[0] != 1:
+            return None
+        i = 12
+        while True:
+            ln = data[i]
+            i += 1
+            if ln == 0:
+                break
+            i += ln
+            if i >= len(data):
+                return None
+        return struct.unpack("!H", data[i:i+2])[0]
+    except Exception:
+        return None
+def empty_nodata(query):
+    tid = query[:2]
+    flags = struct.unpack("!H", query[2:4])[0]
+    out = 0x8000 | (flags & 0x0100) | 0x0080
+    return tid + struct.pack("!HHHHH", out, 1, 0, 0, 0) + query[12:]
+def relay_udp(data):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(5)
+    try:
+        s.sendto(data, UP)
+        resp, _ = s.recvfrom(4096)
+        return resp
+    except OSError:
+        return None
+    finally:
+        s.close()
+def handle_udp(data, addr, srv):
+    try:
+        if qtype_of(data) == 28:
+            srv.sendto(empty_nodata(data), addr)
+            return
+        resp = relay_udp(data)
+        if resp is not None:
+            srv.sendto(resp, addr)
+    except OSError:
+        pass
+def handle_tcp(c):
+    try:
+        hdr = c.recv(2)
+        if len(hdr) < 2:
+            return
+        ln = struct.unpack("!H", hdr)[0]
+        data = b""
+        while len(data) < ln:
+            chunk = c.recv(ln - len(data))
+            if not chunk:
+                return
+            data += chunk
+        if qtype_of(data) == 28:
+            resp = empty_nodata(data)
+        else:
+            s = socket.create_connection(UP, timeout=5)
+            s.sendall(struct.pack("!H", len(data)) + data)
+            rhdr = s.recv(2)
+            if len(rhdr) < 2:
+                return
+            rln = struct.unpack("!H", rhdr)[0]
+            resp = b""
+            while len(resp) < rln:
+                chunk = s.recv(rln - len(resp))
+                if not chunk:
+                    break
+                resp += chunk
+            s.close()
+            if len(resp) != rln:
+                return
+        c.sendall(struct.pack("!H", len(resp)) + resp)
+    except OSError:
+        pass
+    finally:
+        try:
+            c.close()
+        except OSError:
+            pass
+su = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+su.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+su.bind(("127.0.0.1", 53))
+st = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+st.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+st.bind(("127.0.0.1", 53))
+st.listen(20)
+print("dnsfilter ready", flush=True)
+def udp_loop():
+    while True:
+        try:
+            data, addr = su.recvfrom(4096)
+        except OSError:
+            return
+        threading.Thread(target=handle_udp, args=(data, addr, su), daemon=True).start()
+threading.Thread(target=udp_loop, daemon=True).start()
+while True:
+    c, _ = st.accept()
+    threading.Thread(target=handle_tcp, args=(c,), daemon=True).start()
+PYEOF
+  chmod 644 "$DNSFILTER_SCRIPT"
+  touch "$DNSFILTER_LOG" && chmod 666 "$DNSFILTER_LOG"
+  nohup python3 "$DNSFILTER_SCRIPT" >>"$DNSFILTER_LOG" 2>&1 &
+  echo $! > "$DNSFILTER_PID"
+  local i
+  for i in $(seq 1 30); do
+    if dig +short +time=2 +tries=1 A flathub.org @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
+      log "DNS-Filter laeuft (127.0.0.1:53, AAAA entfernend)."
+      return 0
+    fi
+    sleep 1
+  done
+  warn "DNS-Filter startet nicht (s. ${DNSFILTER_LOG})."
+  return 1
+}
+stop_dns_filter() {
+  if [[ -f "$DNSFILTER_PID" ]]; then
+    kill "$(cat "$DNSFILTER_PID")" 2>/dev/null || true
+    rm -f "$DNSFILTER_PID"
+  fi
+}
+
 # Datei laden: erst Standard-DNS (-4, dann dual), dann Clean-DNS-Bypass.
 # -L folgt Redirects (Tenzen-API -> 302 auf Version). $1=URL $2=Ziel. RC 0 ok.
 fetch_url() {
@@ -334,6 +470,10 @@ ldd /usr/bin/flatpak 2>/dev/null | grep -Eo "lib(curl|soup|ssl|crypto)[^ ]*" | s
 log "Python-HTTPS-Probe (teilt sich NICHT curls Stack):"
 python3 -c "import urllib.request; r=urllib.request.urlopen('https://dl.flathub.org/repo/summary.idx',timeout=20); d=r.read(); print(f'PY-HTTPS: status={r.status} bytes={len(d)}')" 2>&1 \
   | while IFS= read -r line; do echo "[pyhttps] $line"; done || true
+log "NSS-Evidenz (fehlt 'files', sind /etc/hosts-Pins wirkungslos!):"
+grep -E "^hosts:" /etc/nsswitch.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done
+ls -l /etc/hosts /etc/resolv.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done
+grep -c "photon-pinned" /etc/hosts 2>&1 | while IFS= read -r line; do echo "[nss] Pins in hosts: $line"; done
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
 if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
@@ -373,7 +513,22 @@ else
 fi
 log "Interface-MTUs:"
 ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done
-use_clean_dns
+# DNS-Filter starten: AAAA-Antworten entfernen -> v6-first fuer JEDEN
+# Resolver unmoeglich (Heilung falls flatpak v6-first-ohne-Fallback stirbt).
+# Fallback bei Startfehler: altes Clean-DNS.
+DNSFILTER_OK=""
+if start_dns_filter; then
+  [[ -f "$RESOLV_BAK" ]] || cp /etc/resolv.conf "$RESOLV_BAK"
+  printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+  log "Resolver auf DNS-Filter umgestellt (127.0.0.1, Fallback 1.1.1.1)."
+  log "Gate: ahosts muss V4-ONLY zeigen (jedes v6 = Filter wirkungslos!):"
+  getent ahosts dl.flathub.org tenzen.studio 2>&1 \
+    | while IFS= read -r line; do echo "[dnsfilter] $line"; done
+  DNSFILTER_OK=1
+else
+  warn "Weiter mit Clean-DNS (ohne AAAA-Filter)."
+  use_clean_dns
+fi
 # Transparent-Redirect fuer ALLES auf tcp/443 (Kernel-Ebene, keine App-
 # Kooperation noetig). Gate-Fetch beweist den Pfad VOR flatpak.
 TRANS_OK=""
@@ -446,6 +601,7 @@ flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
   || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
 rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
 stop_transparent_proxy
+stop_dns_filter
 restore_dns
 log "Hinweis: /etc/hosts-Pins bleiben bestehen (sonst brechen spaetere flatpak-Updates am LAN-Filter)."
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
