@@ -3,7 +3,7 @@
 # Photon Studio — In-Container-Setup (laeuft IM LXC als root).
 # Wird von install/photon.sh per `pct exec` aufgerufen.
 #
-# Env (optional): PORT=8080 VNC_PASSWORD=... KASMVNC_VERSION=1.3.2
+# Env (optional): PORT=8080 VNC_PASSWORD=... KASMVNC_VERSION=1.5.0
 #
 set -euo pipefail
 
@@ -27,9 +27,11 @@ fail() {
   echo "  Befehl    : ${BASH_COMMAND}" >&2
   echo "------------------------------------------------------------------" >&2
   echo "  Stacktrace (neueste zuerst):" >&2
-  local i
-  for (( i=${#FUNCNAME[@]}-1; i>=0; i-- )); do
-    echo "    at ${FUNCNAME[$i]:-main} (${BASH_SOURCE[$i]:-?}:${BASH_LINENO[$i]:-?})" >&2
+  local frame trace line func src
+  for (( frame=0; frame<25; frame++ )); do
+    trace="$(caller "$frame" 2>/dev/null)" || break
+    read -r line func src <<< "$trace"
+    echo "    at ${func:-?} (${src:-?}:${line:-?})" >&2
   done
   echo "------------------------------------------------------------------" >&2
   echo "  Relevante Logs:" >&2
@@ -39,8 +41,9 @@ fail() {
 }
 trap fail ERR
 
-log() { echo -e "\033[1;32m[photon-setup]\033[0m $*"; }
-die() { echo -e "\033[1;31m[photon-setup FEHLER]\033[0m $*" >&2; exit 1; }
+log()  { echo -e "\033[1;32m[photon-setup]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[photon-setup WARN]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[photon-setup FEHLER]\033[0m $*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "Bitte als root im Container ausfuehren."
 
@@ -50,11 +53,13 @@ export DEBIAN_FRONTEND=noninteractive
 log "1/7 System aktualisieren + Abhaengigkeiten installieren ..."
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates curl wget gnupg sudo \
+  ca-certificates curl wget gnupg sudo locales \
   flatpak \
   openbox xterm dbus-x11 \
   openssl iproute2 \
   python3 xz-utils
+locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
@@ -69,8 +74,9 @@ loginctl enable-linger "$APP_USER" 2>/dev/null || true
 CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
 if [[ -z "$KASMVNC_VERSION" ]]; then
   log "Ermittle neueste KasmVNC-Version ..."
-  KASMVNC_VERSION="$(curl -fsSL --max-time 15 https://api.github.com/repos/kasmtech/KasmVNC/releases/latest \
-    | grep -m1 '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1' || true)"
+  # JSON per python3 parsen (robust, kein grep/sed-Pipe-Kaskadenrisiko).
+  KASMVNC_VERSION="$(curl -fsSL --max-time 15 https://api.github.com/repos/kasmtech/KasmVNC/releases/latest 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name","").lstrip("v"))' 2>/dev/null || true)"
   [[ -n "$KASMVNC_VERSION" ]] || { warn "GitHub-API nicht erreichbar, nutze Fallback ${KASMVNC_FALLBACK}"; KASMVNC_VERSION="$KASMVNC_FALLBACK"; }
 fi
 log "3/7 KasmVNC ${KASMVNC_VERSION} installieren ..."
