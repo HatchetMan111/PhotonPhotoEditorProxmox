@@ -103,7 +103,19 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 
 # -------------------------------------------------------- 4) Photon ----
 log "4/7 Photon Studio (Flatpak, ~270 MB) herunterladen + installieren ..."
-flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+# Flathub-Remote mit Retry: DNS kann im frischen Container kurz wackeln
+# (apt/GitHub gingen, flathub schlug fehl -> transient). Diagnose bei Totalausfall.
+for attempt in 1 2 3; do
+  if flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo; then break; fi
+  if [[ "$attempt" == "3" ]]; then
+    warn "Flathub-Remote 3x fehlgeschlagen. DNS-Diagnose:"
+    echo "--- /etc/resolv.conf ---" >&2; cat /etc/resolv.conf >&2 || true
+    echo "--- getent hosts flathub.org ---" >&2; getent hosts flathub.org >&2 || true
+    echo "--- getent hosts archive.ubuntu.com (Kontrolle) ---" >&2; getent hosts archive.ubuntu.com >&2 || true
+    die "Flathub-Remote nicht erreichbar. Netzwerk/DNS im Container pruefen (s. Diagnose oben)."
+  fi
+  sleep 10
+done
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
 for attempt in 1 2 3; do
   # -L folgt dem 302-Redirect der Tenzen-API auf die aktuellste Version.
@@ -112,7 +124,12 @@ for attempt in 1 2 3; do
   sleep 5
 done
 [[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak ist leer - Download unvollstaendig."
-flatpak install -y --noninteractive "$PHOTON_FLATPAK"
+# Runtime-Deps kommen von Flathub -> ebenfalls Retry (Netz kann wackeln).
+for attempt in 1 2 3; do
+  if flatpak install -y --noninteractive "$PHOTON_FLATPAK"; then break; fi
+  [[ "$attempt" == "3" ]] && die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
+  sleep 10
+done
 rm -f "$PHOTON_FLATPAK"
 PHOTON_APP_ID="$(flatpak list --app --columns=application 2>/dev/null | grep -i -m1 photon || true)"
 [[ -n "$PHOTON_APP_ID" ]] || die "Photon Flatpak-App-ID nach Installation nicht gefunden. 'flatpak list --app' Ausgabe pruefen."
