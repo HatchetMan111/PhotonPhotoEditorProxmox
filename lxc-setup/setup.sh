@@ -179,6 +179,8 @@ while True:
 PYEOF
   chmod 644 "$TPROXY_SCRIPT"
   touch "$TPROXY_LOG" && chmod 666 "$TPROXY_LOG"
+  # Alte Instanz weg (Resume-Lauf!), sonst EADDRINUSE.
+  if command -v pkill >/dev/null 2>&1; then pkill -f photon-tproxy.py 2>/dev/null || true; sleep 1; fi
   sudo -u nobody nohup python3 "$TPROXY_SCRIPT" >>"$TPROXY_LOG" 2>&1 &
   echo $! > "$TPROXY_PID"
   local i
@@ -358,6 +360,8 @@ while True:
 PYEOF
   chmod 644 "$DNSFILTER_SCRIPT"
   touch "$DNSFILTER_LOG" && chmod 666 "$DNSFILTER_LOG"
+  # Alte Instanz weg (Resume-Lauf!), sonst EADDRINUSE auf Port 53.
+  if command -v pkill >/dev/null 2>&1; then pkill -f photon-dnsfilter.py 2>/dev/null || true; sleep 1; fi
   nohup python3 "$DNSFILTER_SCRIPT" >>"$DNSFILTER_LOG" 2>&1 &
   echo $! > "$DNSFILTER_PID"
   local i
@@ -416,7 +420,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl wget gnupg sudo dnsutils \
   flatpak \
   openbox xterm dbus-x11 \
-  openssl iproute2 iputils-ping iptables strace \
+  openssl iproute2 iputils-ping iptables strace procps \
   python3 xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -652,13 +656,20 @@ fi
 echo -n "$VNC_PASSWORD" > /root/.photon_vnc_password
 chmod 600 /root/.photon_vnc_password
 
+PASSWD_FILE="/home/${APP_USER}/.kasmpasswd"
 sudo -u "$APP_USER" mkdir -p "/home/${APP_USER}/.vnc" "/home/${APP_USER}/.config/openbox"
+rm -f "$PASSWD_FILE" /root/.kasmpasswd
 # vncpasswd liest via getpass() von /dev/tty — eine Pipe reicht nicht (KasmVNC #141).
 # `script` stellt ein Pseudo-TTY bereit, stdin liefert die Antworten (Passwort + Verify).
+# -H: HOME=/home/photon (ohne -H bliebe HOME=/root und die Datei landet falsch).
+# Explizite Passwort-Datei: keine Orts-Raterei, passt zu kasm_password_file.
 printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" \
-  | script -qec "sudo -u ${APP_USER} ${VNCPASSWD_BIN} -u ${APP_USER} -w" /dev/null >/dev/null \
-  || die "VNC-Passwort konnte nicht gesetzt werden."
-[[ -f "/home/${APP_USER}/.kasmpasswd" ]] || die "Passwortdatei ~/.kasmpasswd wurde nicht angelegt."
+  | script -qec "sudo -H -u ${APP_USER} ${VNCPASSWD_BIN} -u ${APP_USER} -w ${PASSWD_FILE}" /dev/null > /tmp/vncpasswd.log 2>&1 \
+  || { warn "vncpasswd-Sitzung:"; cat /tmp/vncpasswd.log >&2 || true; die "VNC-Passwort konnte nicht gesetzt werden."; }
+rm -f /tmp/vncpasswd.log
+[[ -f "$PASSWD_FILE" ]] || die "Passwortdatei ${PASSWD_FILE} wurde nicht angelegt."
+chown "${APP_USER}:${APP_USER}" "$PASSWD_FILE"
+chmod 600 "$PASSWD_FILE"
 
 # Eigenes xstartup: deterministisch Openbox starten (statt -select-de zu raten).
 cat > "/home/${APP_USER}/.vnc/xstartup" <<'EOF'
