@@ -400,8 +400,8 @@ fetch_url() {
 dump_nat_state() {
   echo "--- iptables nat OUTPUT (Counter!) ---" >&2
   iptables -t nat -L OUTPUT -n -v --line-numbers >&2 2>/dev/null || echo "(kein iptables-Zugriff)" >&2
-  echo "--- tproxy.log (letzte 30) ---" >&2
-  tail -n 30 "$TPROXY_LOG" >&2 2>/dev/null || echo "(kein tproxy.log)" >&2
+  echo "--- tproxy.log (VOLL, ungekürzt) ---" >&2
+  cat "$TPROXY_LOG" >&2 2>/dev/null || echo "(kein tproxy.log)" >&2
 }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -416,7 +416,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl wget gnupg sudo dnsutils \
   flatpak \
   openbox xterm dbus-x11 \
-  openssl iproute2 iputils-ping iptables \
+  openssl iproute2 iputils-ping iptables strace \
   python3 xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -580,6 +580,15 @@ if [[ -z "$RUNTIME_OK" ]]; then
   echo "--- Routen + MTU ---" >&2
   ip route >&2 || true
   ip -o link show >&2 || true
+  echo "--- STRACE letzter Versuch (Netz-Syscalls: connect zu WAS, errno?) ---" >&2
+  timeout 120 strace -f -e trace=%network -o /tmp/strace.log \
+    flatpak install -y --noninteractive flathub "$FLATHUB_RUNTIME" >/tmp/strace-out.log 2>&1 || true
+  grep -aE "connect\(|ENET|EHOST|EACCES|EPERM|EAFNOSUPPORT|ENOENT|ENOEXEC" /tmp/strace.log 2>/dev/null \
+    | tail -n 40 >&2 || echo "(keine Treffer/kein Log)" >&2
+  echo "--- strace-Schwanz (letzte Syscalls vor Ende) ---" >&2
+  tail -n 30 /tmp/strace.log >&2 2>/dev/null || true
+  rm -f /tmp/strace.log /tmp/strace-out.log
+  dump_nat_state
   die "Runtime-Installation fehlgeschlagen (s. Ausgabe + Diagnose oben)."
 fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
