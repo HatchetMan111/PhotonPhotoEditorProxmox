@@ -463,17 +463,18 @@ log "4/7 Photon Studio (Flatpak, ~270 MB + Runtime) herunterladen + installieren
 FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
 FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
 FLATHUB_RUNTIME="org.freedesktop.Platform/x86_64/25.08"
-netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
+netcheck flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio \
+  || warn "Netz-Check unvollstaendig (s. Zeilen oben) - weiter."
 log "HTTP-Stack-Fingerabdruck (welche TLS-Lib nutzt flatpak?):"
 ldd /usr/bin/flatpak 2>/dev/null | grep -Eo "lib(curl|soup|ssl|crypto)[^ ]*" | sort -u \
-  | while IFS= read -r line; do echo "[stack] $line"; done
+  | while IFS= read -r line; do echo "[stack] $line"; done || true
 log "Python-HTTPS-Probe (teilt sich NICHT curls Stack):"
 python3 -c "import urllib.request; r=urllib.request.urlopen('https://dl.flathub.org/repo/summary.idx',timeout=20); d=r.read(); print(f'PY-HTTPS: status={r.status} bytes={len(d)}')" 2>&1 \
   | while IFS= read -r line; do echo "[pyhttps] $line"; done || true
 log "NSS-Evidenz (fehlt 'files', sind /etc/hosts-Pins wirkungslos!):"
-grep -E "^hosts:" /etc/nsswitch.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done
-ls -l /etc/hosts /etc/resolv.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done
-grep -c "photon-pinned" /etc/hosts 2>&1 | while IFS= read -r line; do echo "[nss] Pins in hosts: $line"; done
+grep -E "^hosts:" /etc/nsswitch.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done || true
+ls -l /etc/hosts /etc/resolv.conf 2>&1 | while IFS= read -r line; do echo "[nss] $line"; done || true
+echo "[nss] Pins in hosts: $(grep -c "photon-pinned" /etc/hosts 2>/dev/null || true)"
 # Diagnose: flathub.org hat IPv4+IPv6; falls der Container nur defektes IPv6
 # hat (FritzBox/Pi-hole-LANs), IPv4 bevorzugen. Harmlos, falls v6 ok ist.
 if ! curl -fsSL --max-time 8 -6 -o /dev/null "$FLATHUB_REPO_URL" 2>/dev/null; then
@@ -494,7 +495,7 @@ fi
 pin_hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio
 log "Resolver-Check (muss die Pins zeigen, sonst wirkt /etc/hosts nicht):"
 getent hosts flathub.org dl.flathub.org tenzen.studio downloads.tenzen.studio 2>&1 \
-  | while IFS= read -r line; do echo "[resolve] $line"; done
+  | while IFS= read -r line; do echo "[resolve] $line"; done || true
 # MTU-Blackhole-Heilung (PPPoE 1492 vs. 1500): SYN (klein) + TLS-Handshake
 # passieren, grosse Datensegmente sterben unterwegs (PMTUD-ICMP gefiltert).
 # MSS-Clamp zwingt BEIDE Seiten zu kleineren Segmenten. Harmlos sonst.
@@ -512,7 +513,7 @@ else
   warn "  iptables fehlt (weiter ohne Clamp)."
 fi
 log "Interface-MTUs:"
-ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done
+ip -o link show 2>&1 | while IFS= read -r line; do echo "[mtu] $line"; done || true
 # DNS-Filter starten: AAAA-Antworten entfernen -> v6-first fuer JEDEN
 # Resolver unmoeglich (Heilung falls flatpak v6-first-ohne-Fallback stirbt).
 # Fallback bei Startfehler: altes Clean-DNS.
@@ -523,7 +524,7 @@ if start_dns_filter; then
   log "Resolver auf DNS-Filter umgestellt (127.0.0.1, Fallback 1.1.1.1)."
   log "Gate: ahosts muss V4-ONLY zeigen (jedes v6 = Filter wirkungslos!):"
   getent ahosts dl.flathub.org tenzen.studio 2>&1 \
-    | while IFS= read -r line; do echo "[dnsfilter] $line"; done
+    | while IFS= read -r line; do echo "[dnsfilter] $line"; done || true
   DNSFILTER_OK=1
 else
   warn "Weiter mit Clean-DNS (ohne AAAA-Filter)."
@@ -611,7 +612,9 @@ log "Photon App-ID: ${PHOTON_APP_ID}"
 # ------------------------------------------------- 5) Desktop/Login ---
 log "5/7 Web-Desktop (Openbox + Photon-Autostart) einrichten ..."
 if [[ -z "$VNC_PASSWORD" ]]; then
-  VNC_PASSWORD="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 16)"
+  # head -c schliesst frueh -> SIGPIPE in der Pipe -> || true + Laengen-Guard.
+  VNC_PASSWORD="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 16 || true)"
+  [[ "${#VNC_PASSWORD}" -ge 8 ]] || VNC_PASSWORD="photon-$(openssl rand -hex 4)"
   log "VNC-Passwort generiert (wird am Ende des Host-Scripts angezeigt)."
 fi
 echo -n "$VNC_PASSWORD" > /root/.photon_vnc_password
