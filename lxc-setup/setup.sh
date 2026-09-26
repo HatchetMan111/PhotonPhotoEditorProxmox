@@ -460,6 +460,29 @@ VNCPASSWD_BIN="$(command -v kasmvncpasswd || command -v vncpasswd || true)"
 
 # -------------------------------------------------------- 4) Photon ----
 log "4/7 Photon Studio (Flatpak, ~270 MB + Runtime) herunterladen + installieren ..."
+# AppArmor: Ubuntu liefert /etc/apparmor.d/flatpak als Minimal-Profil
+# ("unconfined"-Flag, de facto OHNE network-Regeln). Auf Desktop-Ubuntu
+# egal, im UNPRIVILEGIERTEN LXC (UserNS) werden damit ALLE flatpak-Netz-
+# Sockets DENIED (Host-dmesg: apparmor DENIED ... profile="flatpak" ...
+# family="inet"), waehrend curl/python duerfen. Fix ueber den vorgesehenen
+# local-Override + Reload (wirkt auch fuer flatpak-Kinder + spaetere Updates).
+if [[ -f /etc/apparmor.d/flatpak ]]; then
+  log "AppArmor-Profil fuer flatpak netzfaehig machen ..."
+  mkdir -p /etc/apparmor.d/local
+  printf '  network inet stream,\n  network inet dgram,\n  network inet6 stream,\n  network inet6 dgram,\n' > /etc/apparmor.d/local/flatpak
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    if apparmor_parser -r /etc/apparmor.d/flatpak 2>&1 | tail -n 3; then
+      log "  AppArmor-Profil neu geladen (mit network-Regeln)."
+    else
+      warn "  apparmor_parser Reload scheiterte - flatpak bleibt ggf. netzlos."
+    fi
+  else
+    warn "  apparmor_parser fehlt - flatpak bleibt ggf. netzlos."
+  fi
+  systemctl enable apparmor 2>/dev/null || true
+else
+  log "Kein /etc/apparmor.d/flatpak-Profil vorhanden (nichts zu tun)."
+fi
 FLATHUB_REPO_URL="https://flathub.org/repo/flathub.flatpakrepo"
 FLATHUB_REPO_FILE="/tmp/flathub.flatpakrepo"
 FLATHUB_RUNTIME="org.freedesktop.Platform/x86_64/25.08"

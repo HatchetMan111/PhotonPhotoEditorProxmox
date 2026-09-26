@@ -51,6 +51,16 @@ aus (LAN-DNS bleibt Standard). Sauberer Dauer-Fix: im Pi-hole/AdGuard
 `tenzen.studio`, `downloads.tenzen.studio`, `flathub.org`, `dl.flathub.org`
 whitelisten.
 
+## Hinweis: AppArmor im unprivilegierten LXC
+
+Ubuntu liefert `/etc/apparmor.d/flatpak` als Minimal-Profil (de facto ohne
+`network`-Regeln). Auf Desktop-Ubuntu egal, im unprivilegierten LXC werden
+damit **alle** flatpak-Netz-Sockets DENIED (Host-`dmesg`:
+`apparmor="DENIED" ... profile="flatpak" ... family="inet"`), während
+curl/python funktionieren. Das Setup schreibt daher automatisch
+`/etc/apparmor.d/local/flatpak` mit `network`-Regeln und lädt das Profil
+neu — der dafür vorgesehene Override-Mechanismus.
+
 ## Nutzung
 
 Nach der Installation: `http://[LXC-IP]:8080` im Browser öffnen, mit dem angezeigten
