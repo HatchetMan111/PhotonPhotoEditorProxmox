@@ -619,11 +619,13 @@ if [[ -z "$RUNTIME_OK" ]]; then
   die "Runtime-Installation fehlgeschlagen (s. Ausgabe + Diagnose oben)."
 fi
 PHOTON_FLATPAK="/tmp/photon-studio.flatpak"
-if [[ "${PHOTON_PRESEEDED:-}" == "1" ]]; then
+if [[ "${PHOTON_PRESEEDED:-}" == "1" ]] && [[ -s /root/photon-studio.flatpak ]]; then
   # Host hat die Datei per pct push nach /root/photon-studio.flatpak gelegt.
   PHOTON_FLATPAK="/root/photon-studio.flatpak"
-  log "Nutze Host-Preseed: ${PHOTON_FLATPAK}"
+  log "Nutze Host-Preseed: ${PHOTON_FLATPAK} ($(du -h "$PHOTON_FLATPAK" | cut -f1))."
 else
+  [[ "${PHOTON_PRESEEDED:-}" == "1" ]] \
+    && warn "Preseed angekuendigt, Datei fehlt/leer - lade selbst herunter."
   for attempt in 1 2 3; do
     # -L (in fetch_url) folgt dem 302-Redirect der Tenzen-API auf die Version.
     if fetch_url "$PHOTON_API_URL" "$PHOTON_FLATPAK"; then break; fi
