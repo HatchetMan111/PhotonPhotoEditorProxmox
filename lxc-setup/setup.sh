@@ -716,7 +716,7 @@ fi
 
 # -------------------------------------------------------- 7) Check ----
 log "7/7 Verifikation ..."
-# Service darf kurz brauchen (Restart-Backoff); Web UI erst recht
+# Service darf kurz brauchen (Restart-Backoff); Port ebenso
 # (Zertifikate + Desktop-Init beim Erststart). Darum Retrys statt One-Shot.
 SERVICE_OK=""
 for i in $(seq 1 6); do
@@ -724,14 +724,27 @@ for i in $(seq 1 6); do
   sleep 5
 done
 [[ -n "$SERVICE_OK" ]] || die "kasmvnc-Service laeuft nicht. Logs: journalctl -u kasmvnc -n 100 --no-pager"
-WEB_OK=""
+# Port horcht? Per ss (beruehrt kein Auth -> kein Blacklist-Risiko).
+# Hintergrund: KasmVNC sperrt IPs nach 5 unauthentifizierten Versuchen;
+# die alte curl-Retry-Schleife hat localhost SELBST geblacklistet!
+PORT_OK=""
 for i in $(seq 1 12); do
-  # KasmVNC: HTTPS mit selbstsigniertem Zertifikat (-k); http als Fallback.
-  if curl -ksf -o /dev/null --max-time 10 "https://localhost:${PORT}/" \
-    || curl -sf -o /dev/null --max-time 10 "http://localhost:${PORT}/"; then
-    WEB_OK=1; break
-  fi
+  if ss -tln 2>/dev/null | grep -q ":${PORT} "; then PORT_OK=1; break; fi
   sleep 10
 done
-[[ -n "$WEB_OK" ]] || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: journalctl -u kasmvnc -n 100 --no-pager"
-log "OK: kasmvnc aktiv, Web UI antwortet auf Port ${PORT}. Photon-App-ID: ${PHOTON_APP_ID}"
+[[ -n "$PORT_OK" ]] || die "Nichts horcht auf Port ${PORT}. Logs: journalctl -u kasmvnc -n 100 --no-pager"
+# EIN authentifizierter Request (max 2 Versuche, weit unter Threshold 5):
+# beweist Ende-zu-Ende, dass TLS + HTTP + unser handgeschriebener
+# Passwort-Hash funktionieren. 401/403/000 = Login kaputt -> laut sterben.
+AUTH_CODE=""
+for i in 1 2; do
+  AUTH_CODE="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 \
+    -u "${APP_USER}:${VNC_PASSWORD}" "https://localhost:${PORT}/" || echo 000)"
+  [[ "$AUTH_CODE" != "000" ]] && break
+  sleep 5
+done
+if [[ "$AUTH_CODE" == "401" || "$AUTH_CODE" == "403" ]]; then
+  die "Login mit VNC-Passwort abgewiesen (HTTP ${AUTH_CODE}) - Passwort-Hash pruefen."
+fi
+[[ "$AUTH_CODE" != "000" ]] || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: journalctl -u kasmvnc -n 100 --no-pager"
+log "OK: kasmvnc aktiv, Port ${PORT} horcht, Login ok (HTTP ${AUTH_CODE}). Photon-App-ID: ${PHOTON_APP_ID}"

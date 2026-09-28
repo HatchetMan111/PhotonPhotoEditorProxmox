@@ -202,10 +202,20 @@ fi
 log "Verifiziere Installation ..."
 pct exec "$CTID" -- systemctl is-active --quiet kasmvnc \
   || die "Service 'kasmvnc' laeuft nicht. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
-pct exec "$CTID" -- bash -c "curl -ksf -o /dev/null --max-time 10 https://localhost:${PORT}/ || curl -sf -o /dev/null --max-time 10 http://localhost:${PORT}/" \
-  || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
-
 SAVED_PW="$(pct exec "$CTID" -- cat /root/.photon_vnc_password 2>/dev/null || true)"
+# Port-Check per ss (kein HTTP-GET: KasmVNC blacklisted IPs nach 5
+# unauthentifizierten Versuchen - kein Retry-Feuer hier!).
+pct exec "$CTID" -- bash -c "ss -tln | grep -q ':${PORT} '" \
+  || die "Nichts horcht auf Port ${PORT}. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
+# EIN authentifizierter Request = Ende-zu-Ende-Beweis (TLS + Login).
+if [[ -n "${SAVED_PW:-}" ]]; then
+  AUTH_CODE="$(pct exec "$CTID" -- curl -k -s -o /dev/null -w '%{http_code}' --max-time 10 -u "photon:${SAVED_PW}" "https://localhost:${PORT}/" || echo 000)"
+  [[ "$AUTH_CODE" == "401" || "$AUTH_CODE" == "403" ]] \
+    && die "Login abgewiesen (HTTP ${AUTH_CODE}). Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
+  [[ "$AUTH_CODE" != "000" ]] \
+    || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
+  log "Login ok (HTTP ${AUTH_CODE})."
+fi
 
 echo ""
 echo "=================================================================="
