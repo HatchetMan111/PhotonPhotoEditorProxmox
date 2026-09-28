@@ -679,6 +679,13 @@ printf '%s:%s:rw\n' "$APP_USER" "$PASSWD_HASH" > "$PASSWD_FILE"
 chown "${APP_USER}:${APP_USER}" "$PASSWD_FILE"
 chmod 600 "$PASSWD_FILE"
 log "VNC-Passwortdatei geschrieben (${PASSWD_FILE})."
+# Evidenz: legacy ~/.vnc/passwd (8B DES, unbekannte Herkunft) duerfte die
+# HTTP-Auth ueberlagern - nur DOKUMENTIEREN, nichts loeschen.
+if [[ -f "/home/${APP_USER}/.vnc/passwd" ]]; then
+  warn "Legacy-Datei ~/.vnc/passwd existiert (Inhalt?):"
+  ls -l "/home/${APP_USER}/.vnc/passwd" >&2 || true
+  od -A x -t x1z "/home/${APP_USER}/.vnc/passwd" 2>/dev/null | head -3 >&2 || true
+fi
 
 # Eigenes xstartup: deterministisch Openbox starten (statt -select-de zu raten).
 cat > "/home/${APP_USER}/.vnc/xstartup" <<'EOF'
