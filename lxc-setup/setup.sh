@@ -693,10 +693,15 @@ if [[ -f "/home/${APP_USER}/.vnc/passwd" ]]; then
 fi
 
 # Eigenes xstartup: deterministisch Openbox starten (statt -select-de zu raten).
+# dbus-launch: zypak (Electron-Flatpak-Helper) braucht DBUS_SESSION_BUS_ADDRESS,
+# sonst Assertion-Fail + Abort. KEIN unset davon!
 cat > "/home/${APP_USER}/.vnc/xstartup" <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  eval "$(dbus-launch --sh-syntax)" || true
+fi
+export DBUS_SESSION_BUS_ADDRESS
 exec openbox-session
 EOF
 chmod +x "/home/${APP_USER}/.vnc/xstartup"
