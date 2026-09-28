@@ -179,6 +179,7 @@ while True:
 PYEOF
   chmod 644 "$TPROXY_SCRIPT"
   touch "$TPROXY_LOG" && chmod 666 "$TPROXY_LOG"
+  : > "$TPROXY_LOG" 2>/dev/null || true
   # Alte Instanz weg (Resume-Lauf!), sonst EADDRINUSE.
   if command -v pkill >/dev/null 2>&1; then pkill -f photon-tproxy.py 2>/dev/null || true; sleep 1; fi
   sudo -u nobody nohup python3 "$TPROXY_SCRIPT" >>"$TPROXY_LOG" 2>&1 &
@@ -635,9 +636,13 @@ else
 fi
 [[ -s "$PHOTON_FLATPAK" ]] || die "Photon-Flatpak fehlt/leer: ${PHOTON_FLATPAK}"
 # (Volle Ausgabe, keine Kuerzung: komplette Fehlerkette ist Pflicht.)
-log "Installiere Photon-Bundle (Runtime bereits vorhanden) ..."
-flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
-  || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
+if flatpak list --app --columns=application 2>/dev/null | grep -qi photon; then
+  log "Photon-Bundle bereits installiert - ueberspringe."
+else
+  log "Installiere Photon-Bundle (Runtime bereits vorhanden) ..."
+  flatpak install -y --noninteractive "$PHOTON_FLATPAK" \
+    || die "Flatpak-Installation fehlgeschlagen (s. Ausgabe oben)."
+fi
 rm -f "$PHOTON_FLATPAK" /root/photon-studio.flatpak
 stop_transparent_proxy
 stop_dns_filter
