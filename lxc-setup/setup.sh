@@ -661,17 +661,19 @@ chmod 600 /root/.photon_vnc_password
 PASSWD_FILE="/home/${APP_USER}/.kasmpasswd"
 sudo -u "$APP_USER" mkdir -p "/home/${APP_USER}/.vnc" "/home/${APP_USER}/.config/openbox"
 rm -f "$PASSWD_FILE" /root/.kasmpasswd
-# vncpasswd liest via getpass() von /dev/tty — eine Pipe reicht nicht (KasmVNC #141).
-# `script` stellt ein Pseudo-TTY bereit, stdin liefert die Antworten (Passwort + Verify).
-# -H: HOME=/home/photon (ohne -H bliebe HOME=/root und die Datei landet falsch).
-# Explizite Passwort-Datei: keine Orts-Raterei, passt zu kasm_password_file.
-printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" \
-  | script -qec "sudo -H -u ${APP_USER} ${VNCPASSWD_BIN} -u ${APP_USER} -w ${PASSWD_FILE}" /dev/null > /tmp/vncpasswd.log 2>&1 \
-  || { warn "vncpasswd-Sitzung:"; cat /tmp/vncpasswd.log >&2 || true; die "VNC-Passwort konnte nicht gesetzt werden."; }
-rm -f /tmp/vncpasswd.log
-[[ -f "$PASSWD_FILE" ]] || die "Passwortdatei ${PASSWD_FILE} wurde nicht angelegt."
+# Passwortdatei DIREKT schreiben (Format aus KasmVNC kasmpasswd.c):
+#   user:$5$salt$hash:perms   (perms rw = sehen + steuern, wie -w)
+# Grund: kasmvncpasswd braucht /dev/tty (getpass), das im LXC fehlt (ENOENT).
+# `openssl passwd -5` == glibc crypt SHA256 == kasmpasswd_hash() (verifiziert).
+# Salt-Alphabet ./0-9A-Za-z, 16 Zeichen; grosszuegig generieren (tr filtert).
+PASSWD_SALT="$(openssl rand -base64 48 | tr -dc './0-9A-Za-z' | head -c 16 || true)"
+[[ "${#PASSWD_SALT}" -eq 16 ]] || die "Salt-Generierung fehlgeschlagen."
+PASSWD_HASH="$(printf '%s' "$VNC_PASSWORD" | openssl passwd -5 -salt "$PASSWD_SALT" -stdin)"
+[[ "$PASSWD_HASH" == \$5\$* ]] || die "Hash-Erzeugung fehlgeschlagen."
+printf '%s:%s:rw\n' "$APP_USER" "$PASSWD_HASH" > "$PASSWD_FILE"
 chown "${APP_USER}:${APP_USER}" "$PASSWD_FILE"
 chmod 600 "$PASSWD_FILE"
+log "VNC-Passwortdatei geschrieben (${PASSWD_FILE})."
 
 # Eigenes xstartup: deterministisch Openbox starten (statt -select-de zu raten).
 cat > "/home/${APP_USER}/.vnc/xstartup" <<'EOF'
