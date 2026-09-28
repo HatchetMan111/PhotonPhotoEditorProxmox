@@ -669,12 +669,10 @@ rm -f "$PASSWD_FILE" /root/.kasmpasswd
 # Passwortdatei DIREKT schreiben (Format aus KasmVNC kasmpasswd.c):
 #   user:$5$salt$hash:perms   (perms rw = sehen + steuern, wie -w)
 # Grund: kasmvncpasswd braucht /dev/tty (getpass), das im LXC fehlt (ENOENT).
-# `openssl passwd -5` == glibc crypt SHA256 == kasmpasswd_hash() (verifiziert).
-# Salt-Alphabet ./0-9A-Za-z, 16 Zeichen; grosszuegig generieren (tr filtert).
-PASSWD_SALT="$(openssl rand -base64 48 | tr -dc './0-9A-Za-z' | head -c 16 || true)"
-[[ "${#PASSWD_SALT}" -eq 16 ]] || die "Salt-Generierung fehlgeschlagen."
-PASSWD_HASH="$(printf '%s' "$VNC_PASSWORD" | openssl passwd -5 -salt "$PASSWD_SALT" -stdin)"
-[[ "$PASSWD_HASH" == \$5\$* ]] || die "Hash-Erzeugung fehlgeschlagen."
+# WICHTIG: websocket.c vergleicht per crypt(passwort, "$5$kasm$") mit FESTEM
+# Salt - NUR Hashes mit Salt "kasm" koennen je matchen (belegt per Test)!
+PASSWD_HASH="$(printf '%s' "$VNC_PASSWORD" | openssl passwd -5 -salt kasm -stdin)"
+[[ "$PASSWD_HASH" == \$5\$kasm\$* ]] || die "Hash-Erzeugung fehlgeschlagen."
 printf '%s:%s:rw\n' "$APP_USER" "$PASSWD_HASH" > "$PASSWD_FILE"
 chown "${APP_USER}:${APP_USER}" "$PASSWD_FILE"
 chmod 600 "$PASSWD_FILE"
