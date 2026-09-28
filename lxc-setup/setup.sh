@@ -655,10 +655,17 @@ log "Photon App-ID: ${PHOTON_APP_ID}"
 # ------------------------------------------------- 5) Desktop/Login ---
 log "5/7 Web-Desktop (Openbox + Photon-Autostart) einrichten ..."
 if [[ -z "$VNC_PASSWORD" ]]; then
-  # head -c schliesst frueh -> SIGPIPE in der Pipe -> || true + Laengen-Guard.
-  VNC_PASSWORD="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 16 || true)"
-  [[ "${#VNC_PASSWORD}" -ge 8 ]] || VNC_PASSWORD="photon-$(openssl rand -hex 4)"
-  log "VNC-Passwort generiert (wird am Ende des Host-Scripts angezeigt)."
+  if [[ -s /root/.photon_vnc_password ]]; then
+    # Resume: bestehendes Passwort weiterverwenden (kein stiller Rotation!),
+    # sonst wuerde jeder Re-Run gespeicherte Logins entwerten.
+    VNC_PASSWORD="$(cat /root/.photon_vnc_password)"
+    log "Bestehendes VNC-Passwort weiterverwendet."
+  else
+    # head -c schliesst frueh -> SIGPIPE in der Pipe -> || true + Laengen-Guard.
+    VNC_PASSWORD="$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c 16 || true)"
+    [[ "${#VNC_PASSWORD}" -ge 8 ]] || VNC_PASSWORD="photon-$(openssl rand -hex 4)"
+    log "VNC-Passwort generiert (wird am Ende des Host-Scripts angezeigt)."
+  fi
 fi
 echo -n "$VNC_PASSWORD" > /root/.photon_vnc_password
 chmod 600 /root/.photon_vnc_password
