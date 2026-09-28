@@ -3,7 +3,7 @@
 [Photon Studio](https://tenzen.studio/photon/) (Tenzen Studio) ist ein **Desktop**-Bildeditor
 (Layers, Retusche, PSD-Support, alles lokal) — kein Web-Server. Dieses Repo installiert ihn als
 **LXC-Container auf Proxmox** und macht ihn im lokalen Netzwerk per **Web-Desktop (KasmVNC)**
-im Browser bedienbar: `http://[LXC-IP]:8080`.
+im Browser bedienbar: `https://[LXC-IP]:8080` (selbstsigniert, Warnung bestaetigen wie bei Proxmox).
 
 Linux-Build: offizielles Flatpak direkt von Tenzen
 (`https://tenzen.studio/api/v1/photon/download?platform=linux&arch=x64`, folgt Redirect auf die
@@ -63,7 +63,7 @@ neu — der dafür vorgesehene Override-Mechanismus.
 
 ## Nutzung
 
-Nach der Installation: `http://[LXC-IP]:8080` im Browser öffnen, mit dem angezeigten
+Nach der Installation: `https://[LXC-IP]:8080` im Browser öffnen (Zertifikatswarnung bestaetigen), mit dem angezeigten
 VNC-Passwort anmelden — Photon Studio startet automatisch. Dateien bleiben im Container
 (`VNC_PASSWORD` steht auch in `/root/.photon_vnc_password` im Container).
 
@@ -91,9 +91,9 @@ systemd/kasmvnc.service # systemd-Unit (Template mit {{USER}}/{{PORT}})
 ## Testdurchlauf (Nachweis)
 
 ```
-1. Einzeiler auf PVE-Host ausführen  → „Photon Studio erfolgreich installiert! http://…:8080"
+1. Einzeiler auf PVE-Host ausführen  → „Photon Studio erfolgreich installiert! https://…:8080"
 2. pct exec <CTID> -- systemctl is-active kasmvnc   → active
-3. curl -sf http://<LXC-IP>:8080/                    → 200
+3. curl -ksf https://<LXC-IP>:8080/                  → 200
 4. pct reboot <CTID> → 2 Min warten → Browser-Check → wieder erreichbar
 ```
 

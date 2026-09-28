@@ -202,7 +202,7 @@ fi
 log "Verifiziere Installation ..."
 pct exec "$CTID" -- systemctl is-active --quiet kasmvnc \
   || die "Service 'kasmvnc' laeuft nicht. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
-pct exec "$CTID" -- bash -c "curl -sf -o /dev/null --max-time 10 http://localhost:${PORT}/" \
+pct exec "$CTID" -- bash -c "curl -ksf -o /dev/null --max-time 10 https://localhost:${PORT}/ || curl -sf -o /dev/null --max-time 10 http://localhost:${PORT}/" \
   || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: pct exec ${CTID} -- journalctl -u kasmvnc -n 100 --no-pager"
 
 SAVED_PW="$(pct exec "$CTID" -- cat /root/.photon_vnc_password 2>/dev/null || true)"
@@ -212,7 +212,7 @@ echo "=================================================================="
 echo "  ${APP_NAME} erfolgreich installiert!"
 echo "  ----------------------------------------------------------------"
 echo "  Container : CT ${CTID} (${CT_HOSTNAME})"
-echo "  Web-Desktop: http://${IP}:${PORT}"
+echo "  Web-Desktop: https://${IP}:${PORT} (selbstsigniert, Warnung bestaetigen)"
 if [[ -n "${SAVED_PW:-}" ]]; then
 echo "  VNC-Passwort (in CT /root/.photon_vnc_password gespeichert): ${SAVED_PW}"
 fi

@@ -726,7 +726,11 @@ done
 [[ -n "$SERVICE_OK" ]] || die "kasmvnc-Service laeuft nicht. Logs: journalctl -u kasmvnc -n 100 --no-pager"
 WEB_OK=""
 for i in $(seq 1 12); do
-  if curl -sf -o /dev/null --max-time 10 "http://localhost:${PORT}/"; then WEB_OK=1; break; fi
+  # KasmVNC: HTTPS mit selbstsigniertem Zertifikat (-k); http als Fallback.
+  if curl -ksf -o /dev/null --max-time 10 "https://localhost:${PORT}/" \
+    || curl -sf -o /dev/null --max-time 10 "http://localhost:${PORT}/"; then
+    WEB_OK=1; break
+  fi
   sleep 10
 done
 [[ -n "$WEB_OK" ]] || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: journalctl -u kasmvnc -n 100 --no-pager"
