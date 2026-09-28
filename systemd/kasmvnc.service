@@ -18,7 +18,9 @@ Environment=HOME=/home/{{USER}}
 # Exit 2 sterben), xstartup bleibt unangetastet (select-de.sh-Logik).
 # -websocketPort: Web-UI-Port (HTTPS, selbstsigniert). KEIN -httpPort -
 # das gibt es in KasmVNC nicht ("Unrecognized option", Exit 255)!
-ExecStart=/usr/bin/kasmvncserver :1 -interface 0.0.0.0 -websocketPort {{PORT}} -FrameRate 30 -depth 24 -geometry 1920x1080 -select-de manual
+# -fg: Vordergrund (ohne daemonisiert der Wrapper, Parent exit 0 ->
+# "Deactivated successfully" + Restart-Loop mit verwaistem Xvnc).
+ExecStart=/usr/bin/kasmvncserver :1 -fg -interface 0.0.0.0 -websocketPort {{PORT}} -FrameRate 30 -depth 24 -geometry 1920x1080 -select-de manual
 ExecStop=/usr/bin/kasmvncserver -kill :1
 Restart=always
 RestartSec=5
