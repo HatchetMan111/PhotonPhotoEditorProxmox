@@ -689,6 +689,9 @@ exec openbox-session
 EOF
 chmod +x "/home/${APP_USER}/.vnc/xstartup"
 chown -R "${APP_USER}:${APP_USER}" "/home/${APP_USER}/.vnc" "/home/${APP_USER}/.config"
+# Marker: DE-Auswahl als "erledigt" markieren (Gurt + Hosentraeger zu
+# -select-de manual in der Unit; ohne ihn fragt kasmvncserver interaktiv).
+sudo -u "$APP_USER" touch "/home/${APP_USER}/.vnc/.de-was-selected"
 adduser "$APP_USER" ssl-cert 2>/dev/null || true
 
 cat > "/home/${APP_USER}/.config/openbox/autostart" <<EOF
@@ -713,8 +716,18 @@ fi
 
 # -------------------------------------------------------- 7) Check ----
 log "7/7 Verifikation ..."
-systemctl is-active --quiet kasmvnc || die "kasmvnc-Service laeuft nicht."
-sleep 3
-curl -sf -o /dev/null --max-time 10 "http://localhost:${PORT}/" \
-  || die "Web UI antwortet nicht auf localhost:${PORT}."
+# Service darf kurz brauchen (Restart-Backoff); Web UI erst recht
+# (Zertifikate + Desktop-Init beim Erststart). Darum Retrys statt One-Shot.
+SERVICE_OK=""
+for i in $(seq 1 6); do
+  if systemctl is-active --quiet kasmvnc; then SERVICE_OK=1; break; fi
+  sleep 5
+done
+[[ -n "$SERVICE_OK" ]] || die "kasmvnc-Service laeuft nicht. Logs: journalctl -u kasmvnc -n 100 --no-pager"
+WEB_OK=""
+for i in $(seq 1 12); do
+  if curl -sf -o /dev/null --max-time 10 "http://localhost:${PORT}/"; then WEB_OK=1; break; fi
+  sleep 10
+done
+[[ -n "$WEB_OK" ]] || die "Web UI antwortet nicht auf localhost:${PORT}. Logs: journalctl -u kasmvnc -n 100 --no-pager"
 log "OK: kasmvnc aktiv, Web UI antwortet auf Port ${PORT}. Photon-App-ID: ${PHOTON_APP_ID}"

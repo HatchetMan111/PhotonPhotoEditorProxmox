@@ -14,7 +14,9 @@ PAMName=login
 WorkingDirectory=/home/{{USER}}
 Environment=HOME=/home/{{USER}}
 # X-Session kommt aus ~/.vnc/xstartup (openbox-session + Photon-Autostart).
-ExecStart=/usr/bin/kasmvncserver :1 -interface 0.0.0.0 -httpPort {{PORT}} -FrameRate 30 -depth 24 -geometry 1920x1080
+# -select-de manual: KEIN interaktiver DE-Dialog (wuerde unter systemd mit
+# Exit 2 sterben), xstartup bleibt unangetastet (select-de.sh-Logik).
+ExecStart=/usr/bin/kasmvncserver :1 -interface 0.0.0.0 -httpPort {{PORT}} -FrameRate 30 -depth 24 -geometry 1920x1080 -select-de manual
 ExecStop=/usr/bin/kasmvncserver -kill :1
 Restart=always
 RestartSec=5
